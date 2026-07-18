@@ -1,2 +1,10 @@
 .DS_Store
 *.jpg
+.venv/
+.venv-export/
+__pycache__/
+*.mlpackage/
+runs/
+models/
+*.pt
+out/
