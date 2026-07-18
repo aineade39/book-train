@@ -4,21 +4,20 @@ End-to-end: 4TU book-spine LabelMe polygons → YOLO-OBB → Core ML.
 
 Dataset: https://doi.org/10.4121/uuid:33f2a166-de13-4505-b359-2b202c491fd8
 
-Setup (once):
+Setup (once, from the repo root):
 
-  cd /Users/joebr/dev/book-train
   python3 -m venv .venv
   source .venv/bin/activate
   python -m pip install -U pip ultralytics opencv-python-headless
 
-Full run (your 4TU dump is under ~/Downloads):
+Full run (fetches raw ``4tu-spines`` zip via tools/fetch_raw.py):
 
   source .venv/bin/activate
-  python tools/train_4tu_obb.py --source ~/Downloads
+  python tools/train_4tu_obb.py
 
 Smoke test (3 images, convert only):
 
-  python tools/train_4tu_obb.py --source ~/Downloads --limit 3 --skip-train --skip-export
+  python tools/train_4tu_obb.py --limit 3 --skip-train --skip-export
 """
 
 from __future__ import annotations
@@ -33,40 +32,48 @@ import sys
 from pathlib import Path
 from typing import Any
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from fetch_raw import unpacked_raw  # noqa: E402
+from derived_meta import write_derived_source  # noqa: E402
+from paths import derived_dir, models_candidates, raw_dir, runs_dir  # noqa: E402
+
 CLASS_NAME = "spine"
 CLASS_ID = 0
 
 
 def parse_args() -> argparse.Namespace:
-    home = Path.home()
     p = argparse.ArgumentParser(
         description="Convert 4TU spines to YOLO-OBB, train, and export Core ML."
     )
     p.add_argument(
+        "--raw-id",
+        default="4tu-spines",
+        help="Raw dataset id (SOURCE.md). Fetched/unpacked via fetch_raw unless --source is set.",
+    )
+    p.add_argument(
         "--source",
         type=Path,
-        default=home / "Downloads",
-        help="Folder that contains (or is) the 4TU dump. "
-        "Also accepts ~/dowload or a path ending in dataset_661. "
-        f"Default: {home / 'Downloads'}",
+        default=None,
+        help="Optional already-unpacked LabelMe root (skips fetch). "
+        "Also accepts a path ending in dataset_661.",
     )
     p.add_argument(
         "--dataset-out",
         type=Path,
-        default=home / "data" / "yolo-obb-spines",
+        default=derived_dir("4tu-spines_yolo-obb"),
         help="Where to write YOLO images/labels/yaml.",
     )
     p.add_argument(
         "--runs-out",
         type=Path,
-        default=home / "data" / "yolo-obb-runs",
+        default=runs_dir(),
         help="Ultralytics project directory for training runs.",
     )
     p.add_argument(
         "--export-out",
         type=Path,
-        default=Path(__file__).resolve().parents[1] / "models",
-        help="Folder for the exported .mlpackage (default: repo models/).",
+        default=models_candidates(),
+        help="Folder for the exported .mlpackage (default: $BOOK_SPINES_DATA/models/candidates).",
     )
     p.add_argument("--split", type=float, default=0.8, help="Train fraction.")
     p.add_argument("--seed", type=int, default=42)
@@ -93,6 +100,11 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=None,
         help="Existing .pt to export (skips train). Useful after a prior run.",
+    )
+    p.add_argument(
+        "--keep-tmp",
+        action="store_true",
+        help="Keep $BOOK_SPINES_DATA/tmp/<fetch> after unpack (debug).",
     )
     return p.parse_args()
 
@@ -133,8 +145,8 @@ def resolve_json_root(source: Path) -> Path:
         Path.home() / "dowload" / "dataset_661",
         Path.home() / "download",
         Path.home() / "Downloads",
-        Path.home() / "data" / "4tu-spines",
-        Path.home() / "data" / "4tu-spines" / "dataset_661",
+        raw_dir("4tu-spines"),
+        raw_dir("4tu-spines", "dataset_661"),
     ):
         if alt.exists():
             candidates.append(alt.resolve())
@@ -183,8 +195,8 @@ def resolve_json_root(source: Path) -> Path:
 
     raise FileNotFoundError(
         f"No LabelMe *.json files found under {source}. "
-        "Unpack the 4TU zip so dataset_661/*.json is reachable, then pass "
-        "--source ~/data/4tu-spines/dataset_661"
+        "Unpack the 4TU archive (fetch_raw) so dataset_661/*.json is reachable, "
+        "or pass --source pointing at dataset_661."
     )
 
 
@@ -504,16 +516,30 @@ def main() -> int:
 
     yaml_path = args.dataset_out / "spines.yaml"
     if not args.skip_convert:
-        json_root = resolve_json_root(args.source)
-        print(f"LabelMe JSON root: {json_root}")
-        yaml_path = convert_dataset(
-            json_root=json_root,
-            out_root=args.dataset_out,
-            split=args.split,
-            seed=args.seed,
-            limit=args.limit,
-            min_size=args.min_size,
-        )
+        with unpacked_raw(args.raw_id, keep_tmp=args.keep_tmp, override_root=args.source) as raw_root:
+            json_root = resolve_json_root(raw_root)
+            print(f"LabelMe JSON root: {json_root}")
+            yaml_path = convert_dataset(
+                json_root=json_root,
+                out_root=args.dataset_out,
+                split=args.split,
+                seed=args.seed,
+                limit=args.limit,
+                min_size=args.min_size,
+            )
+            write_derived_source(
+                args.dataset_out,
+                derived_id=args.dataset_out.name,
+                title="4TU LabelMe -> YOLO-OBB",
+                sources=[args.raw_id],
+                script="tools/train_4tu_obb.py",
+                flags={
+                    "split": args.split,
+                    "seed": args.seed,
+                    "limit": args.limit,
+                    "min_size": args.min_size,
+                },
+            )
     elif not yaml_path.is_file():
         print(f"--skip-convert set but missing {yaml_path}", file=sys.stderr)
         return 1

@@ -6,10 +6,10 @@ object-detection dataset.
 Dataset: https://doi.org/10.4121/uuid:33f2a166-de13-4505-b359-2b202c491fd8
 
 Usage:
-  python3 tools/convert_4tu_to_createml.py \\
-      --input ~/data/4tu-spines \\
-      --output ~/data/createml-spines \\
-      --split 0.8
+  python3 tools/convert_4tu_to_createml.py
+
+  # or point at an already-unpacked tree:
+  python3 tools/convert_4tu_to_createml.py --input /path/to/unpacked
 
 Then in Create ML → Object Detection, drag in the `train` folder
 (images + annotations.json). Optionally use `valid` as the test set.
@@ -26,6 +26,11 @@ import sys
 from pathlib import Path
 from typing import Any
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from fetch_raw import unpacked_raw  # noqa: E402
+from derived_meta import write_derived_source  # noqa: E402
+from paths import derived_dir  # noqa: E402
+
 
 CREATE_ML_LABEL = "spine"
 
@@ -35,17 +40,22 @@ def parse_args() -> argparse.Namespace:
         description="Convert 4TU LabelMe spine JSONs to Create ML object detection format."
     )
     p.add_argument(
+        "--raw-id",
+        default="4tu-spines",
+        help="Raw dataset id (SOURCE.md). Fetched/unpacked via fetch_raw unless --input is set.",
+    )
+    p.add_argument(
         "--input",
         "-i",
         type=Path,
-        required=True,
-        help="Folder containing LabelMe .json files (recursive).",
+        default=None,
+        help="Optional already-unpacked LabelMe root (skips fetch).",
     )
     p.add_argument(
         "--output",
         "-o",
         type=Path,
-        required=True,
+        default=derived_dir("4tu-spines_createml"),
         help="Output folder (will create train/ and optionally valid/).",
     )
     p.add_argument(
@@ -76,6 +86,11 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=0,
         help="Process at most N JSON files (0 = all). Useful for a smoke test.",
+    )
+    p.add_argument(
+        "--keep-tmp",
+        action="store_true",
+        help="Keep $BOOK_SPINES_DATA/tmp/<fetch> after unpack (debug).",
     )
     return p.parse_args()
 
@@ -250,51 +265,63 @@ def main() -> int:
         print("--split must be in (0, 1]", file=sys.stderr)
         return 1
 
-    if not args.input.is_dir():
-        print(f"Input folder not found: {args.input}", file=sys.stderr)
-        return 1
+    with unpacked_raw(args.raw_id, keep_tmp=args.keep_tmp, override_root=args.input) as raw_root:
+        json_files = find_json_files(raw_root)
+        if not json_files:
+            print(f"No .json files under {raw_root}", file=sys.stderr)
+            return 1
 
-    json_files = find_json_files(args.input)
-    if not json_files:
-        print(f"No .json files under {args.input}", file=sys.stderr)
-        return 1
+        if args.limit > 0:
+            json_files = json_files[: args.limit]
 
-    if args.limit > 0:
-        json_files = json_files[: args.limit]
+        print(f"Found {len(json_files)} LabelMe JSON file(s) under {raw_root}")
 
-    print(f"Found {len(json_files)} LabelMe JSON file(s)")
+        if args.output.exists():
+            print(f"Clearing existing output: {args.output}")
+            shutil.rmtree(args.output)
+        args.output.mkdir(parents=True)
 
-    if args.output.exists():
-        print(f"Clearing existing output: {args.output}")
-        shutil.rmtree(args.output)
-    args.output.mkdir(parents=True)
+        rng = random.Random(args.seed)
+        shuffled = list(json_files)
+        rng.shuffle(shuffled)
 
-    rng = random.Random(args.seed)
-    shuffled = list(json_files)
-    rng.shuffle(shuffled)
+        if args.split >= 1.0:
+            train_files, valid_files = shuffled, []
+        else:
+            n_train = max(1, int(round(len(shuffled) * args.split)))
+            # Keep at least one valid sample when possible.
+            if len(shuffled) > 1 and n_train >= len(shuffled):
+                n_train = len(shuffled) - 1
+            train_files = shuffled[:n_train]
+            valid_files = shuffled[n_train:]
 
-    if args.split >= 1.0:
-        train_files, valid_files = shuffled, []
-    else:
-        n_train = max(1, int(round(len(shuffled) * args.split)))
-        # Keep at least one valid sample when possible.
-        if len(shuffled) > 1 and n_train >= len(shuffled):
-            n_train = len(shuffled) - 1
-        train_files = shuffled[:n_train]
-        valid_files = shuffled[n_train:]
-
-    train_n, train_boxes = write_split(
-        train_files, args.output, "train", args.label, args.min_size
-    )
-    print(f"train: {train_n} images, {train_boxes} boxes → {args.output / 'train'}")
-
-    if valid_files:
-        valid_n, valid_boxes = write_split(
-            valid_files, args.output, "valid", args.label, args.min_size
+        train_n, train_boxes = write_split(
+            train_files, args.output, "train", args.label, args.min_size
         )
-        print(f"valid: {valid_n} images, {valid_boxes} boxes → {args.output / 'valid'}")
-    else:
-        print("valid: skipped (--split 1.0)")
+        print(f"train: {train_n} images, {train_boxes} boxes → {args.output / 'train'}")
+
+        if valid_files:
+            valid_n, valid_boxes = write_split(
+                valid_files, args.output, "valid", args.label, args.min_size
+            )
+            print(f"valid: {valid_n} images, {valid_boxes} boxes → {args.output / 'valid'}")
+        else:
+            print("valid: skipped (--split 1.0)")
+
+        write_derived_source(
+            args.output,
+            derived_id=args.output.name,
+            title="4TU LabelMe -> Create ML object detection",
+            sources=[args.raw_id],
+            script="tools/convert_4tu_to_createml.py",
+            flags={
+                "split": args.split,
+                "seed": args.seed,
+                "limit": args.limit,
+                "min_size": args.min_size,
+                "label": args.label,
+            },
+        )
 
     print(
         "\nNext: open Create ML → Object Detection → "

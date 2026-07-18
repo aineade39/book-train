@@ -35,7 +35,12 @@ func log(_ message: String) {
 }
 
 var imagePath: String? = nil
-var modelPath = "models/combined_yolo26s-obb_1024px_deg90_ep120_frac100_20260717-0755_fp16.mlpackage"
+// Default: promoted export under $BOOK_SPINES_DATA (or ~/ml/book-spines).
+var modelPath: String = {
+    let root = ProcessInfo.processInfo.environment["BOOK_SPINES_DATA"]
+        ?? NSString(string: "~/ml/book-spines").expandingTildeInPath
+    return "\(root)/models/production/SpineDetectorOBB-aug.mlpackage"
+}()
 var confThreshold: Float = 0.15
 var iouThreshold: Double = 0.45
 var maxDetections = 500

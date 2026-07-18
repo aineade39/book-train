@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Usage:
-#   gce_sync.sh push-code       # tools/*.py + spines.yaml layout to ~/book-train
-#   gce_sync.sh push-dataset    # dataset (images+labels only, no .npy cache) to ~/data
-#   gce_sync.sh pull-run <run_name>   # pull a run dir back down to ~/data/yolo-obb-runs
+#   gce_sync.sh push-code       # tools/*.py to ~/book-train
+#   gce_sync.sh push-dataset    # derived combined dataset (no .npy cache)
+#   gce_sync.sh pull-run <run_name>   # pull a run dir into $LOCAL_RUNS_ROOT
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")"
 source ./gce_config.sh
@@ -29,12 +29,13 @@ case "$cmd" in
     if [ ! -d "$LOCAL_DATA_ROOT" ]; then
       echo "Missing $LOCAL_DATA_ROOT" >&2; exit 1
     fi
+    remote_parent="$(dirname "$REMOTE_DATA_ROOT")"
     echo "Pushing dataset (excluding .npy cache) to $INSTANCE:$REMOTE_DATA_ROOT ..."
     gcloud compute ssh "$INSTANCE" --project="$PROJECT" --zone="$ZONE" \
-      --command="mkdir -p ~/data"
+      --command="mkdir -p $remote_parent"
     tar -C "$(dirname "$LOCAL_DATA_ROOT")" --exclude='*.npy' -cf - "$(basename "$LOCAL_DATA_ROOT")" \
       | gcloud compute ssh "$INSTANCE" --project="$PROJECT" --zone="$ZONE" \
-          --command="tar -xf - -C ~/data"
+          --command="tar -xf - -C $remote_parent"
     echo "Done."
     ;;
 
@@ -46,7 +47,7 @@ case "$cmd" in
     mkdir -p "$LOCAL_RUNS_ROOT"
     echo "Pulling $REMOTE_RUNS_ROOT/$run_name -> $LOCAL_RUNS_ROOT/$run_name ..."
     gcloud compute ssh "$INSTANCE" --project="$PROJECT" --zone="$ZONE" \
-      --command="tar --exclude='*.npy' -C ~/data/yolo-obb-runs -cf - '$run_name'" \
+      --command="tar --exclude='*.npy' -C $REMOTE_RUNS_ROOT -cf - '$run_name'" \
       | tar -xf - -C "$LOCAL_RUNS_ROOT"
     echo "Done. -> $LOCAL_RUNS_ROOT/$run_name"
     ;;

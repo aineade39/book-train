@@ -8,9 +8,9 @@ of only rewarding vertical-spine accuracy.
 Sources:
   4TU : already converted at --tu-dataset (images/labels/{train,val}, produced
         by tools/train_4tu_obb.py).
-  IEEE: raw COCO zip at --ieee-zip (book_spine/annotations/instances_*2017.json
-        + book_spine/images/{train,test}2017/*.jpg). train2017 -> train split,
-        test2017 -> val split (kept as the dataset's own split).
+  IEEE: raw COCO under dataset id ``ieee-book-spine`` (fetched via
+        tools/fetch_raw.py: Drive zip → temp unpack → directory).
+        train2017 -> train, test2017 -> val.
 
 Rotation strategy: training rotation is handled online by Ultralytics
 (degrees=90 in the train step), which is effectively free and infinite.
@@ -18,10 +18,7 @@ Static rotated copies are added here only to the *validation* split, so
 checkpoint selection (best.pt) is not blind to rotated spines.
 
 Usage:
-  python tools/build_spines_dataset.py \\
-    --ieee-zip ~/Downloads/book_spine.zip \\
-    --tu-dataset ~/data/yolo-obb-spines \\
-    --out ~/data/yolo-obb-combined
+  python tools/build_spines_dataset.py
 
 Dev smoke run (fast, small subset):
   python tools/build_spines_dataset.py --limit 20
@@ -34,7 +31,6 @@ import json
 import random
 import shutil
 import sys
-import zipfile
 from pathlib import Path
 from typing import Any
 
@@ -42,6 +38,9 @@ import cv2
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from derived_meta import write_derived_source  # noqa: E402
+from fetch_raw import unpacked_raw  # noqa: E402
+from paths import derived_dir  # noqa: E402
 from train_4tu_obb import CLASS_NAME, corners_to_yolo_line, polygon_to_obb_corners  # noqa: E402
 
 Quad = list[tuple[float, float]]
@@ -49,16 +48,25 @@ RotationRecord = tuple[str, bytes, int, int, list[Quad]]
 
 
 def parse_args() -> argparse.Namespace:
-    home = Path.home()
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--ieee-zip", type=Path, default=home / "Downloads" / "book_spine.zip")
+    p.add_argument(
+        "--ieee-id",
+        default="ieee-book-spine",
+        help="Raw dataset id (SOURCE.md under raw/<id>/). Fetched/unpacked via fetch_raw.",
+    )
+    p.add_argument(
+        "--ieee-root",
+        type=Path,
+        default=None,
+        help="Optional already-unpacked IEEE book_spine/ directory (skips fetch).",
+    )
     p.add_argument(
         "--tu-dataset",
         type=Path,
-        default=home / "data" / "yolo-obb-spines",
+        default=derived_dir("4tu-spines_yolo-obb"),
         help="Already-converted 4TU YOLO-OBB dataset (images/labels/{train,val}).",
     )
-    p.add_argument("--out", type=Path, default=home / "data" / "yolo-obb-combined")
+    p.add_argument("--out", type=Path, default=derived_dir("4tu-ieee_yolo-obb"))
     p.add_argument("--min-size", type=float, default=4.0, help="Min OBB side in pixels.")
     p.add_argument(
         "--rotate-val-fraction",
@@ -79,6 +87,11 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument("--tile-threshold-mult", type=float, default=2.0)
     p.add_argument("--tile-overlap", type=float, default=0.25)
+    p.add_argument(
+        "--keep-tmp",
+        action="store_true",
+        help="Keep $BOOK_SPINES_DATA/tmp/<fetch> after IEEE unpack (debug).",
+    )
     return p.parse_args()
 
 
@@ -194,13 +207,14 @@ def process_4tu(
 
 
 # ---------------------------------------------------------------------------
-# IEEE: decode COCO polygons straight from the zip, no full extraction needed
+# IEEE: COCO polygons from an unpacked book_spine/ directory
 # ---------------------------------------------------------------------------
 
 
-def load_ieee_split(zip_path: Path, ann_name: str) -> tuple[dict[int, dict[str, Any]], dict[int, list[dict[str, Any]]]]:
-    with zipfile.ZipFile(zip_path) as zf:
-        data = json.loads(zf.read(f"book_spine/annotations/{ann_name}"))
+def load_ieee_split(
+    data_root: Path, ann_name: str
+) -> tuple[dict[int, dict[str, Any]], dict[int, list[dict[str, Any]]]]:
+    data = json.loads((data_root / "annotations" / ann_name).read_text(encoding="utf-8"))
     images = {img["id"]: img for img in data["images"]}
     anns_by_image: dict[int, list[dict[str, Any]]] = {}
     for ann in data["annotations"]:
@@ -209,7 +223,7 @@ def load_ieee_split(zip_path: Path, ann_name: str) -> tuple[dict[int, dict[str, 
 
 
 def process_ieee(
-    zip_path: Path,
+    data_root: Path,
     ann_name: str,
     image_subdir: str,
     out_split: str,
@@ -217,7 +231,7 @@ def process_ieee(
     min_size: float,
     limit: int,
 ) -> tuple[int, int, list[RotationRecord]]:
-    images, anns_by_image = load_ieee_split(zip_path, ann_name)
+    images, anns_by_image = load_ieee_split(data_root, ann_name)
     items = sorted(images.items())
     if limit:
         items = items[:limit]
@@ -225,41 +239,41 @@ def process_ieee(
     count_images = count_boxes = 0
     rotation_records: list[RotationRecord] = []
 
-    with zipfile.ZipFile(zip_path) as zf:
-        for image_id, img_meta in items:
-            file_name = img_meta["file_name"]
-            width, height = int(img_meta["width"]), int(img_meta["height"])
+    for image_id, img_meta in items:
+        file_name = img_meta["file_name"]
+        width, height = int(img_meta["width"]), int(img_meta["height"])
 
-            quads: list[Quad] = []
-            for ann in anns_by_image.get(image_id, []):
-                if ann.get("iscrowd"):
-                    continue
-                seg = ann.get("segmentation")
-                if not seg:
-                    continue
-                flat = seg[0]
-                pts = [[flat[i], flat[i + 1]] for i in range(0, len(flat), 2)]
-                corners = polygon_to_obb_corners(pts)
-                if corners is not None:
-                    quads.append(corners)
-
-            lines = [line for corners in quads if (line := corners_to_yolo_line(corners, width, height, min_size))]
-            if not lines:
+        quads: list[Quad] = []
+        for ann in anns_by_image.get(image_id, []):
+            if ann.get("iscrowd"):
                 continue
+            seg = ann.get("segmentation")
+            if not seg:
+                continue
+            flat = seg[0]
+            pts = [[flat[i], flat[i + 1]] for i in range(0, len(flat), 2)]
+            corners = polygon_to_obb_corners(pts)
+            if corners is not None:
+                quads.append(corners)
 
-            stem = f"ieee_{out_split}_{image_id:05d}"
-            ext = (Path(file_name).suffix.lstrip(".") or "jpg").lower()
-            raw = zf.read(f"book_spine/images/{image_subdir}/{file_name}")
+        lines = [line for corners in quads if (line := corners_to_yolo_line(corners, width, height, min_size))]
+        if not lines:
+            continue
 
-            img_out = out_root / "images" / out_split / f"{stem}.{ext}"
-            lbl_out = out_root / "labels" / out_split / f"{stem}.txt"
-            img_out.write_bytes(raw)
-            lbl_out.write_text("\n".join(lines) + "\n", encoding="utf-8")
-            count_images += 1
-            count_boxes += len(lines)
+        stem = f"ieee_{out_split}_{image_id:05d}"
+        ext = (Path(file_name).suffix.lstrip(".") or "jpg").lower()
+        img_path = data_root / "images" / image_subdir / file_name
+        raw = img_path.read_bytes()
 
-            if out_split == "val":
-                rotation_records.append((stem, raw, width, height, quads))
+        img_out = out_root / "images" / out_split / f"{stem}.{ext}"
+        lbl_out = out_root / "labels" / out_split / f"{stem}.txt"
+        img_out.write_bytes(raw)
+        lbl_out.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        count_images += 1
+        count_boxes += len(lines)
+
+        if out_split == "val":
+            rotation_records.append((stem, raw, width, height, quads))
 
     return count_images, count_boxes, rotation_records
 
@@ -350,12 +364,8 @@ def apply_tiling(out_root: Path, tile_size: int, threshold_mult: float, overlap:
 def main() -> int:
     args = parse_args()
     out_root = args.out.expanduser().resolve()
-    ieee_zip = args.ieee_zip.expanduser().resolve()
     tu_dataset = args.tu_dataset.expanduser().resolve()
 
-    if not ieee_zip.is_file():
-        print(f"IEEE zip not found: {ieee_zip}", file=sys.stderr)
-        return 1
     if not tu_dataset.is_dir():
         print(f"4TU dataset not found: {tu_dataset}", file=sys.stderr)
         return 1
@@ -373,12 +383,13 @@ def main() -> int:
     print(f"4TU  train: {tu_train_imgs:5d} images / {tu_train_boxes:6d} boxes")
     print(f"4TU  val:   {tu_val_imgs:5d} images / {tu_val_boxes:6d} boxes")
 
-    ieee_train_imgs, ieee_train_boxes, _ = process_ieee(
-        ieee_zip, "instances_train2017.json", "train2017", "train", out_root, args.min_size, args.limit
-    )
-    ieee_val_imgs, ieee_val_boxes, ieee_val_records = process_ieee(
-        ieee_zip, "instances_test2017.json", "test2017", "val", out_root, args.min_size, args.limit
-    )
+    with unpacked_raw(args.ieee_id, keep_tmp=args.keep_tmp, override_root=args.ieee_root) as ieee_root:
+        ieee_train_imgs, ieee_train_boxes, _ = process_ieee(
+            ieee_root, "instances_train2017.json", "train2017", "train", out_root, args.min_size, args.limit
+        )
+        ieee_val_imgs, ieee_val_boxes, ieee_val_records = process_ieee(
+            ieee_root, "instances_test2017.json", "test2017", "val", out_root, args.min_size, args.limit
+        )
     print(f"IEEE train: {ieee_train_imgs:5d} images / {ieee_train_boxes:6d} boxes")
     print(f"IEEE val:   {ieee_val_imgs:5d} images / {ieee_val_boxes:6d} boxes")
 
@@ -398,6 +409,28 @@ def main() -> int:
 
     final_train = len(list((out_root / "images" / "train").glob("*")))
     final_val = len(list((out_root / "images" / "val").glob("*")))
+    write_derived_source(
+        out_root,
+        derived_id=out_root.name,
+        title="4TU + IEEE YOLO-OBB merge with optional rotated val / tiling",
+        sources=["4tu-spines_yolo-obb", "ieee-book-spine"],
+        script="tools/build_spines_dataset.py",
+        flags={
+            "ieee_id": args.ieee_id,
+            "tu_dataset": str(tu_dataset),
+            "rotate_val_fraction": args.rotate_val_fraction,
+            "rotate_angles": args.rotate_angles,
+            "tile": args.tile,
+            "tile_threshold_mult": args.tile_threshold_mult,
+            "tile_overlap": args.tile_overlap,
+            "min_size": args.min_size,
+            "limit": args.limit,
+            "seed": args.seed,
+            "train_images": final_train,
+            "val_images": final_val,
+        },
+        notes="Rotated val copies are for checkpoint selection only; train rotation is online (degrees=90).",
+    )
     print(f"Combined dataset: {final_train} train images, {final_val} val images -> {out_root}")
     print(f"Dataset YAML: {yaml_path}")
     return 0

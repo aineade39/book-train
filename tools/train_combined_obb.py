@@ -29,13 +29,18 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from derived_meta import dataset_tag_from_dir  # noqa: E402
+from paths import derived_dir, models_candidates, runs_dir  # noqa: E402
+
+
 # Naming convention (applies to both the run dir under --runs-out and the
 # exported .mlpackage name), so a filename alone tells you what it is
 # without opening args.yaml or results.csv:
 #
 #   {dataset}_{arch}_{imgsz}px_deg{degrees}_ep{epochs}_frac{pct}_{YYYYMMDD-HHMM}[_{tag}]
 #
-# e.g. combined_yolo26s-obb_1024px_deg90_ep20_frac15_20260716-2054_smoke
+# e.g. 4tu-ieee_yolo26s-obb_1024px_deg90_ep20_frac15_20260716-2054_smoke
 #
 # The timestamp guarantees auto-generated names never collide across runs
 # with different configs, so `exist_ok=True` can never silently overwrite a
@@ -44,7 +49,7 @@ from typing import Any
 
 
 def build_run_tag(data_yaml: Path, model: str, imgsz: int, degrees: float, epochs: int, fraction: float) -> str:
-    dataset_tag = data_yaml.parent.name.replace("yolo-obb-", "")
+    dataset_tag = dataset_tag_from_dir(data_yaml)
     arch_tag = model.removesuffix(".pt")
     deg_tag = f"deg{int(degrees)}"
     frac_tag = f"frac{int(round(fraction * 100))}"
@@ -53,9 +58,12 @@ def build_run_tag(data_yaml: Path, model: str, imgsz: int, degrees: float, epoch
 
 
 def parse_args() -> argparse.Namespace:
-    home = Path.home()
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--data-yaml", type=Path, default=home / "data" / "yolo-obb-combined" / "spines.yaml")
+    p.add_argument(
+        "--data-yaml",
+        type=Path,
+        default=derived_dir("4tu-ieee_yolo-obb", "spines.yaml"),
+    )
     p.add_argument("--model", default="yolo26s-obb.pt", help="Base checkpoint.")
     p.add_argument("--imgsz", type=int, default=1024)
     p.add_argument("--epochs", type=int, default=120)
@@ -71,12 +79,13 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--flipud", type=float, default=0.5)
     p.add_argument("--fliplr", type=float, default=0.5)
     p.add_argument("--fraction", type=float, default=1.0, help="Fraction of train data to use.")
-    p.add_argument("--runs-out", type=Path, default=home / "data" / "yolo-obb-runs")
+    p.add_argument("--runs-out", type=Path, default=runs_dir())
     p.add_argument("--name", default=None, help="Run name. Default: auto-generated from config + timestamp.")
     p.add_argument(
         "--export-out",
         type=Path,
-        default=Path(__file__).resolve().parents[1] / "models",
+        default=models_candidates(),
+        help="Folder for exported .mlpackage (default: $BOOK_SPINES_DATA/models/candidates).",
     )
     p.add_argument("--export-name", default=None, help="Export filename. Default: <run-name>.mlpackage.")
     p.add_argument("--quantize", default="16", help="Core ML quantize: 16 (fp16), 8, or 'none'.")

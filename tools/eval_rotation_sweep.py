@@ -27,6 +27,9 @@ from typing import Any
 
 import yaml
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from paths import derived_dir  # noqa: E402
+
 BUCKET_RE = re.compile(r"_rot(\d+)(?=\.[A-Za-z0-9]+$)")
 IMG_EXTS = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff"}
 
@@ -122,7 +125,7 @@ def main() -> None:
     ap.add_argument("--weights-name", default=None, help="Display label for --weights (default: filename)")
     ap.add_argument("--compare", type=Path, default=None, help="Second checkpoint to compare against")
     ap.add_argument("--compare-name", default=None, help="Display label for --compare")
-    ap.add_argument("--data-root", type=Path, default=Path.home() / "data" / "yolo-obb-combined")
+    ap.add_argument("--data-root", type=Path, default=derived_dir("4tu-ieee_yolo-obb"))
     ap.add_argument("--angles", default="30,45,60,90", help="Comma-separated rotation angles to evaluate")
     ap.add_argument("--imgsz", type=int, default=1024)
     ap.add_argument("--conf", type=float, default=0.15)

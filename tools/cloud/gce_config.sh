@@ -13,12 +13,14 @@ export BOOT_DISK_SIZE="${BOOT_DISK_SIZE:-250GB}"
 export BOOT_DISK_TYPE="${BOOT_DISK_TYPE:-pd-balanced}"
 
 # Local <-> remote paths (mirrored layout so train_combined_obb.py's defaults
-# work unmodified on both sides).
-export LOCAL_DATA_ROOT="${LOCAL_DATA_ROOT:-$HOME/data/yolo-obb-combined}"
-export LOCAL_RUNS_ROOT="${LOCAL_RUNS_ROOT:-$HOME/data/yolo-obb-runs}"
+# work unmodified on both sides). Override BOOK_SPINES_DATA to relocate.
+export BOOK_SPINES_DATA="${BOOK_SPINES_DATA:-$HOME/ml/book-spines}"
+export LOCAL_DATA_ROOT="${LOCAL_DATA_ROOT:-$BOOK_SPINES_DATA/derived/4tu-ieee_yolo-obb}"
+export LOCAL_RUNS_ROOT="${LOCAL_RUNS_ROOT:-$BOOK_SPINES_DATA/runs}"
 export REMOTE_REPO="${REMOTE_REPO:-~/book-train}"
-export REMOTE_DATA_ROOT="${REMOTE_DATA_ROOT:-~/data/yolo-obb-combined}"
-export REMOTE_RUNS_ROOT="${REMOTE_RUNS_ROOT:-~/data/yolo-obb-runs}"
+export REMOTE_BOOK_SPINES_DATA="${REMOTE_BOOK_SPINES_DATA:-~/ml/book-spines}"
+export REMOTE_DATA_ROOT="${REMOTE_DATA_ROOT:-$REMOTE_BOOK_SPINES_DATA/derived/4tu-ieee_yolo-obb}"
+export REMOTE_RUNS_ROOT="${REMOTE_RUNS_ROOT:-$REMOTE_BOOK_SPINES_DATA/runs}"
 export REMOTE_VENV="${REMOTE_VENV:-~/venv-train}"
 
 gce_ssh() {
