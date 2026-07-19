@@ -36,6 +36,36 @@ case "$cmd" in
     tar -C "$(dirname "$LOCAL_DATA_ROOT")" --exclude='*.npy' -cf - "$(basename "$LOCAL_DATA_ROOT")" \
       | gcloud compute ssh "$INSTANCE" --project="$PROJECT" --zone="$ZONE" \
           --command="tar -xf - -C $remote_parent"
+    # Ultralytics needs an absolute path on the VM (local spines.yaml has Mac paths).
+    # Prefer val_train (stratified unrotated subset) for every-epoch training val;
+    # full images/val stays for eval_rotation_sweep / spines.yaml.
+    gcloud compute ssh "$INSTANCE" --project="$PROJECT" --zone="$ZONE" \
+      --command="
+        if [ -d $REMOTE_DATA_ROOT/images/val_train ]; then
+          VAL_REL=images/val_train
+        else
+          VAL_REL=images/val
+        fi
+        cat > $REMOTE_DATA_ROOT/spines_train.yaml <<EOF
+path: $REMOTE_DATA_ROOT
+train: images/train
+val: \$VAL_REL
+names:
+  0: spine
+EOF
+        # Also refresh spines.yaml for sweeps (always full val).
+        cat > $REMOTE_DATA_ROOT/spines.yaml <<EOF
+path: $REMOTE_DATA_ROOT
+train: images/train
+val: images/val
+names:
+  0: spine
+EOF
+        echo wrote $REMOTE_DATA_ROOT/spines_train.yaml val=\$VAL_REL
+        echo -n 'train '; find $REMOTE_DATA_ROOT/images/train -type f 2>/dev/null | wc -l
+        echo -n 'val '; find $REMOTE_DATA_ROOT/images/val -type f 2>/dev/null | wc -l
+        echo -n 'val_train '; find $REMOTE_DATA_ROOT/images/val_train -type f 2>/dev/null | wc -l
+      "
     echo "Done."
     ;;
 

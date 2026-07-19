@@ -1,5 +1,8 @@
 .DS_Store
 *.jpg
+*.jpeg
+*.png
+*.webp
 .venv/
 .venv-export/
 __pycache__/
@@ -7,4 +10,8 @@ __pycache__/
 runs/
 models/
 *.pt
+*.onnx
+*.npy
 out/
+scenes
+books.json

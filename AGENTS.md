@@ -20,7 +20,7 @@ Two venvs: `.venv` (train / Ultralytics), `.venv-export` (Core ML export / eval
 that needs the export stack). Prefer the matching one.
 
 ```bash
-# Rebuild / refresh combined YOLO dataset
+# Rebuild / refresh combined YOLO dataset (4TU+IEEE+open-shelves+roboflow)
 .venv/bin/python tools/build_spines_dataset.py
 
 # Smoke train + export (fast pipeline check)
@@ -32,6 +32,9 @@ that needs the export stack). Prefer the matching one.
 # Export only from existing weights
 .venv/bin/python tools/train_combined_obb.py --skip-train --weights <path/to/best.pt>
 
+# Resume interrupted run (same run dir). Finished runs: finetune with --model best.pt instead.
+.venv/bin/python tools/train_combined_obb.py --resume --model $BOOK_SPINES_DATA/runs/<run>/weights/last.pt
+
 # Per-angle rotation sweep (required before claiming a win)
 .venv-export/bin/python tools/eval_rotation_sweep.py \
   --weights $BOOK_SPINES_DATA/runs/<run_name>/weights/best.pt \
@@ -41,7 +44,11 @@ that needs the export stack). Prefer the matching one.
   --angles 30,45,60,90 \
   --json $BOOK_SPINES_DATA/eval/sweep.json
 
-# Core ML inference / OCR harness
+# Promote latest run: export if needed, rotation sweep vs aug,
+# production alias + MODELS.md (use --skip-sweep to skip the slow eval)
+.venv-export/bin/python tools/promote_coreml.py --latest
+
+# Core ML inference / OCR harness (default: production/SpineDetectorOBB.mlpackage alias)
 swift bookspines.swift <image> [--model path.mlpackage] [--ocr]
 ```
 
@@ -60,8 +67,11 @@ unless explicitly working on the 4TU-only lineage.
 5. **Acceptance**: a new full run must beat **`SpineDetectorOBB-aug`** on
    **every** rotation bucket in `eval_rotation_sweep.py` (orig / 30 / 45 / 60 / 90),
    not just pooled mAP. Numbers and the comparison recipe live in `MODELS.md`.
-6. After a qualifying eval: add a row to `MODELS.md`; update **Current best**
-   only if it wins all buckets. Do not paste full sidecars into that file.
+6. After train/export: run `tools/promote_coreml.py --latest` (runs the
+   rotation sweep vs aug by default, copies into `models/production/`,
+   retargets `SpineDetectorOBB.mlpackage`, updates **Current best** in
+   `MODELS.md`). Do not paste full sidecars into that file.
+   Leave `SpineDetectorOBB-aug` on disk as the frozen compare baseline.
 7. Raw data under the data root is **irreplaceable**; derived + runs are
    rebuildable. Prefer `rclone copy` for Drive archives (see `DATA.md`).
 8. YOLO26 Core ML output layout differs from YOLO11 — decode paths live in

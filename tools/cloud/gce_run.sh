@@ -3,7 +3,11 @@
 #   gce_run.sh setup                # one-time: venv + pip installs on the VM
 #   gce_run.sh smoke                # short sanity run (no auto-shutdown)
 #   gce_run.sh full [extra args...] # full run; VM self-powers-off when done
+#                                   # finetune:  ./gce_run.sh full --model ~/ml/.../best.pt
+#                                   # resume:    ./gce_run.sh full --resume --model ~/ml/.../last.pt --epochs 180
 #   gce_run.sh status               # trainer / DONE marker / VM state
+#   gce_run.sh mem                  # remote free -h (RAM)
+#   gce_run.sh gpu                  # remote nvidia-smi
 #   gce_run.sh log [n]              # tail last n lines (default 60) of the active log
 #   gce_run.sh stop-instance        # gcloud stop (keeps disk, halts compute+GPU billing)
 #
@@ -43,7 +47,7 @@ case "$cmd" in
       # No --shutdown: smoke is interactive; don't kill the VM mid-debug.
       nohup tools/cloud/remote_train.sh --max-hours 2 -- \
         --smoke --skip-export \
-        --device 0 --batch 16 \
+        --device 0 --batch $TRAIN_BATCH \
         --data-yaml $REMOTE_DATA_ROOT/spines_train.yaml \
         --runs-out $REMOTE_RUNS_ROOT \
         > smoke.log 2>&1 < /dev/null &
@@ -62,7 +66,7 @@ case "$cmd" in
       # VM is shutdown authority: EXIT trap + ${MAX_HOURS}h watchdog.
       nohup tools/cloud/remote_train.sh --shutdown --max-hours $MAX_HOURS -- \
         --skip-export \
-        --device 0 --batch 16 \
+        --device 0 --batch $TRAIN_BATCH \
         --data-yaml $REMOTE_DATA_ROOT/spines_train.yaml \
         --runs-out $REMOTE_RUNS_ROOT \
         $extra_args \
@@ -88,6 +92,14 @@ case "$cmd" in
     " 2>/dev/null || echo "(VM not reachable — if status=TERMINATED, run finished and self-halted)"
     ;;
 
+  mem|free)
+    gcloud compute ssh "$INSTANCE" --project="$PROJECT" --zone="$ZONE" --command="free -h"
+    ;;
+
+  gpu|nvidia-smi)
+    gcloud compute ssh "$INSTANCE" --project="$PROJECT" --zone="$ZONE" --command="nvidia-smi"
+    ;;
+
   log)
     n="${1:-60}"
     gcloud compute ssh "$INSTANCE" --project="$PROJECT" --zone="$ZONE" --command="
@@ -103,7 +115,7 @@ case "$cmd" in
     ;;
 
   *)
-    echo "Usage: $0 {setup|smoke|full [args]|status|log [n]|stop-instance}" >&2
+    echo "Usage: $0 {setup|smoke|full [args]|status|mem|gpu|log [n]|stop-instance}" >&2
     exit 1
     ;;
 esac

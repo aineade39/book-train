@@ -1,26 +1,26 @@
 #!/usr/bin/env python3
 """
-Merge the 4TU (already converted YOLO-OBB) and IEEE (raw COCO) book-spine
-datasets into one combined YOLO-OBB dataset, and add a rotated subset of the
-validation split so checkpoint selection rewards angle-robust models instead
-of only rewarding vertical-spine accuracy.
+Merge 4TU + IEEE + cleaned open-shelves + roboflow into one YOLO-OBB dataset,
+and add a rotated subset of the (4TU+IEEE) validation split so checkpoint
+selection rewards angle-robust models.
 
 Sources:
-  4TU : already converted at --tu-dataset (images/labels/{train,val}, produced
-        by tools/train_4tu_obb.py).
-  IEEE: raw COCO under dataset id ``ieee-book-spine`` (fetched via
-        tools/fetch_raw.py: Drive zip → temp unpack → directory).
+  4TU : already converted at --tu-dataset (images/labels/{train,val}).
+  IEEE: raw COCO under ``ieee-book-spine`` (fetched via tools/fetch_raw.py).
         train2017 -> train, test2017 -> val.
+        Frames failing shared label-QA are skipped.
+  open-shelves / roboflow: cleaned derived trees (active labels only;
+        quarantine_* folders are ignored). Included by default.
 
-Rotation strategy: training rotation is handled online by Ultralytics
-(degrees=90 in the train step), which is effectively free and infinite.
-Static rotated copies are added here only to the *validation* split, so
-checkpoint selection (best.pt) is not blind to rotated spines.
+Rotation strategy: training rotation is online (degrees=90). Static rotated
+copies are added only to val from 4TU+IEEE records (acceptance buckets).
 
 Usage:
   python tools/build_spines_dataset.py
+  # legacy 4TU+IEEE only:
+  python tools/build_spines_dataset.py --no-shelves --out $BOOK_SPINES_DATA/derived/4tu-ieee_yolo-obb
 
-Dev smoke run (fast, small subset):
+Dev smoke:
   python tools/build_spines_dataset.py --limit 20
 """
 
@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import random
 import shutil
 import sys
@@ -38,6 +39,7 @@ import cv2
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from audit_obb_labels import QuadBox, label_qa_reject_reason, shoelace  # noqa: E402
 from derived_meta import write_derived_source  # noqa: E402
 from fetch_raw import unpacked_raw  # noqa: E402
 from paths import derived_dir  # noqa: E402
@@ -45,6 +47,27 @@ from train_4tu_obb import CLASS_NAME, corners_to_yolo_line, polygon_to_obb_corne
 
 Quad = list[tuple[float, float]]
 RotationRecord = tuple[str, bytes, int, int, list[Quad]]
+
+
+def quads_to_audit_boxes(quads: list[Quad]) -> list[QuadBox]:
+    """Pixel quads → audit QuadBox list for shared label-QA rules."""
+    out: list[QuadBox] = []
+    for q in quads:
+        pts = np.array(q, dtype=np.float32)
+        edges = []
+        for i in range(4):
+            d = pts[(i + 1) % 4] - pts[i]
+            L = float(np.hypot(float(d[0]), float(d[1])))
+            ang = math.degrees(math.atan2(float(d[1]), float(d[0]))) % 180
+            if ang > 90:
+                ang -= 180
+            edges.append((L, ang))
+        edges.sort(key=lambda t: -t[0])
+        long_L, ang = edges[0]
+        shorts = sorted(e[0] for e in edges)[:2]
+        short_L = max(1e-6, 0.5 * (shorts[0] + shorts[1]))
+        out.append(QuadBox(pts=pts, area=shoelace(pts), aspect=long_L / short_L, angle=ang))
+    return out
 
 
 def parse_args() -> argparse.Namespace:
@@ -66,7 +89,29 @@ def parse_args() -> argparse.Namespace:
         default=derived_dir("4tu-spines_yolo-obb"),
         help="Already-converted 4TU YOLO-OBB dataset (images/labels/{train,val}).",
     )
-    p.add_argument("--out", type=Path, default=derived_dir("4tu-ieee_yolo-obb"))
+    p.add_argument(
+        "--out",
+        type=Path,
+        default=derived_dir("4tu-ieee-shelves_yolo-obb"),
+        help="Output derived tree (default: 4TU+IEEE+open-shelves+roboflow).",
+    )
+    p.add_argument(
+        "--open-shelves",
+        type=Path,
+        default=derived_dir("open-shelves_yolo-obb"),
+        help="Cleaned open-shelves YOLO-OBB derived tree.",
+    )
+    p.add_argument(
+        "--roboflow",
+        type=Path,
+        default=derived_dir("roboflow-book-spine-obb_yolo-obb"),
+        help="Cleaned roboflow-book-spine-obb YOLO-OBB derived tree.",
+    )
+    p.add_argument(
+        "--no-shelves",
+        action="store_true",
+        help="Skip open-shelves + roboflow (legacy 4TU+IEEE only).",
+    )
     p.add_argument("--min-size", type=float, default=4.0, help="Min OBB side in pixels.")
     p.add_argument(
         "--rotate-val-fraction",
@@ -174,6 +219,7 @@ def process_4tu(
 
     count_images = count_boxes = 0
     rotation_records: list[RotationRecord] = []
+    skipped_qa = 0
 
     for img_path in img_paths:
         lbl_path = lbl_dir / f"{img_path.stem}.txt"
@@ -181,6 +227,18 @@ def process_4tu(
             continue
         lines = [line for line in lbl_path.read_text().splitlines() if line.strip()]
         if not lines:
+            continue
+
+        arr = cv2.imread(str(img_path))
+        if arr is None:
+            continue
+        height, width = arr.shape[:2]
+        quads: list[Quad] = []
+        for line in lines:
+            coords = [float(v) for v in line.split()[1:]]
+            quads.append([(coords[i] * width, coords[i + 1] * height) for i in range(0, 8, 2)])
+        if label_qa_reject_reason(quads_to_audit_boxes(quads), width, height):
+            skipped_qa += 1
             continue
 
         stem = f"4tu_{out_split}_{img_path.stem}"
@@ -192,18 +250,62 @@ def process_4tu(
         count_boxes += len(lines)
 
         if out_split == "val":
-            raw = img_path.read_bytes()
+            rotation_records.append((stem, img_path.read_bytes(), width, height, quads))
+
+    if skipped_qa:
+        print(f"  4TU {split}: skipped {skipped_qa} label-QA fails", flush=True)
+    return count_images, count_boxes, rotation_records
+
+
+def process_yolo_derived(
+    src_root: Path,
+    prefix: str,
+    out_root: Path,
+    limit: int,
+) -> tuple[int, int, int, int]:
+    """Copy active train/val from a cleaned YOLO-OBB derived tree (skip quarantine)."""
+    if not src_root.is_dir():
+        print(f"  skip {prefix}: missing {src_root}", flush=True)
+        return 0, 0, 0, 0
+
+    totals = {"train": (0, 0), "val": (0, 0)}
+    for split in ("train", "val"):
+        img_dir = src_root / "images" / split
+        lbl_dir = src_root / "labels" / split
+        if not img_dir.is_dir() or not lbl_dir.is_dir():
+            continue
+        paths = sorted(p for p in img_dir.glob("*") if p.is_file())
+        if limit:
+            paths = paths[:limit]
+        n_img = n_box = 0
+        skipped_qa = 0
+        for img_path in paths:
+            lbl_path = lbl_dir / f"{img_path.stem}.txt"
+            if not lbl_path.is_file():
+                continue
+            lines = [ln for ln in lbl_path.read_text().splitlines() if ln.strip()]
+            if not lines:
+                continue
             arr = cv2.imread(str(img_path))
             if arr is None:
                 continue
-            height, width = arr.shape[:2]
+            h, w = arr.shape[:2]
             quads: list[Quad] = []
             for line in lines:
                 coords = [float(v) for v in line.split()[1:]]
-                quads.append([(coords[i] * width, coords[i + 1] * height) for i in range(0, 8, 2)])
-            rotation_records.append((stem, raw, width, height, quads))
-
-    return count_images, count_boxes, rotation_records
+                quads.append([(coords[i] * w, coords[i + 1] * h) for i in range(0, 8, 2)])
+            if label_qa_reject_reason(quads_to_audit_boxes(quads), w, h):
+                skipped_qa += 1
+                continue
+            stem = f"{prefix}_{split}_{img_path.stem}"
+            shutil.copy2(img_path, out_root / "images" / split / f"{stem}{img_path.suffix.lower()}")
+            (out_root / "labels" / split / f"{stem}.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
+            n_img += 1
+            n_box += len(lines)
+        if skipped_qa:
+            print(f"  {prefix} {split}: skipped {skipped_qa} label-QA fails", flush=True)
+        totals[split] = (n_img, n_box)
+    return totals["train"][0], totals["train"][1], totals["val"][0], totals["val"][1]
 
 
 # ---------------------------------------------------------------------------
@@ -260,6 +362,15 @@ def process_ieee(
         if not lines:
             continue
 
+        audit_quads = [
+            corners
+            for corners in quads
+            if corners_to_yolo_line(corners, width, height, min_size)
+        ]
+        qa = label_qa_reject_reason(quads_to_audit_boxes(audit_quads), width, height)
+        if qa:
+            continue
+
         stem = f"ieee_{out_split}_{image_id:05d}"
         ext = (Path(file_name).suffix.lstrip(".") or "jpg").lower()
         img_path = data_root / "images" / image_subdir / file_name
@@ -273,7 +384,7 @@ def process_ieee(
         count_boxes += len(lines)
 
         if out_split == "val":
-            rotation_records.append((stem, raw, width, height, quads))
+            rotation_records.append((stem, raw, width, height, audit_quads))
 
     return count_images, count_boxes, rotation_records
 
@@ -393,6 +504,22 @@ def main() -> int:
     print(f"IEEE train: {ieee_train_imgs:5d} images / {ieee_train_boxes:6d} boxes")
     print(f"IEEE val:   {ieee_val_imgs:5d} images / {ieee_val_boxes:6d} boxes")
 
+    os_train = os_val = rf_train = rf_val = 0
+    os_train_b = os_val_b = rf_train_b = rf_val_b = 0
+    sources = ["4tu-spines_yolo-obb", "ieee-book-spine"]
+    if not args.no_shelves:
+        os_train, os_train_b, os_val, os_val_b = process_yolo_derived(
+            args.open_shelves.expanduser().resolve(), "os", out_root, args.limit
+        )
+        rf_train, rf_train_b, rf_val, rf_val_b = process_yolo_derived(
+            args.roboflow.expanduser().resolve(), "rf", out_root, args.limit
+        )
+        print(f"OS   train: {os_train:5d} images / {os_train_b:6d} boxes")
+        print(f"OS   val:   {os_val:5d} images / {os_val_b:6d} boxes")
+        print(f"RF   train: {rf_train:5d} images / {rf_train_b:6d} boxes")
+        print(f"RF   val:   {rf_val:5d} images / {rf_val_b:6d} boxes")
+        sources.extend(["open-shelves_yolo-obb", "roboflow-book-spine-obb_yolo-obb"])
+
     added_images, added_boxes = add_rotated_val(
         tu_val_records + ieee_val_records, angles, args.rotate_val_fraction, out_root, args.min_size, args.seed
     )
@@ -407,17 +534,33 @@ def main() -> int:
         encoding="utf-8",
     )
 
+    # Stratified unrotated subset for every-epoch train val (full val kept for sweeps).
+    try:
+        from make_val_train_subset import build_val_train_subset
+
+        build_val_train_subset(out_root, count=375, seed=args.seed)
+    except Exception as exc:  # noqa: BLE001 — build should still succeed if subset helper fails
+        print(f"warning: val_train subset skipped ({exc})", file=sys.stderr)
+
     final_train = len(list((out_root / "images" / "train").glob("*")))
     final_val = len(list((out_root / "images" / "val").glob("*")))
+    title = (
+        "4TU + IEEE + open-shelves + roboflow YOLO-OBB merge"
+        if not args.no_shelves
+        else "4TU + IEEE YOLO-OBB merge with optional rotated val / tiling"
+    )
     write_derived_source(
         out_root,
         derived_id=out_root.name,
-        title="4TU + IEEE YOLO-OBB merge with optional rotated val / tiling",
-        sources=["4tu-spines_yolo-obb", "ieee-book-spine"],
+        title=title,
+        sources=sources,
         script="tools/build_spines_dataset.py",
         flags={
             "ieee_id": args.ieee_id,
             "tu_dataset": str(tu_dataset),
+            "include_shelves": not args.no_shelves,
+            "open_shelves": str(args.open_shelves),
+            "roboflow": str(args.roboflow),
             "rotate_val_fraction": args.rotate_val_fraction,
             "rotate_angles": args.rotate_angles,
             "tile": args.tile,
@@ -426,10 +569,14 @@ def main() -> int:
             "min_size": args.min_size,
             "limit": args.limit,
             "seed": args.seed,
+            "label_qa": "label_qa_reject_reason on 4TU/IEEE/OS/RF",
             "train_images": final_train,
             "val_images": final_val,
         },
-        notes="Rotated val copies are for checkpoint selection only; train rotation is online (degrees=90).",
+        notes=(
+            "Rotated val copies (4TU+IEEE only) are for checkpoint selection; "
+            "train rotation is online (degrees=90). Shelves use cleaned active labels."
+        ),
     )
     print(f"Combined dataset: {final_train} train images, {final_val} val images -> {out_root}")
     print(f"Dataset YAML: {yaml_path}")

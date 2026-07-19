@@ -30,7 +30,8 @@ Script defaults resolve through `tools/paths.py` / `tools/fetch_raw.py`
 |---|---|
 | Raw dumps | Drive zip + `SOURCE.md`; local `raw/<id>/SOURCE.md` only |
 | 4TU YOLO-OBB | `derived/4tu-spines_yolo-obb` |
-| 4TU+IEEE YOLO-OBB | `derived/4tu-ieee_yolo-obb` |
+| 4TU+IEEE+shelves YOLO-OBB | `derived/4tu-ieee-shelves_yolo-obb` |
+| 4TU+IEEE YOLO-OBB (legacy) | `derived/4tu-ieee_yolo-obb` |
 | Create ML export | `derived/4tu-spines_createml` |
 | Training runs | `runs/` |
 | Trial Core ML | `models/candidates/` |
@@ -59,6 +60,7 @@ reads zip members in place; no permanent unpacked twin on Drive or local raw.
 | `4tu-spines` | [10.4121/uuid:33f2a166-de13-4505-b359-2b202c491fd8](https://doi.org/10.4121/uuid:33f2a166-de13-4505-b359-2b202c491fd8) | `gdrive:dev/ml/raw/4tu-spines/4tu-spines.zip` |
 | `ieee-book-spine` | [10.21227/g82y-gt86](https://doi.org/10.21227/g82y-gt86) | `gdrive:dev/ml/raw/ieee-book-spine/book_spine.zip` |
 | `roboflow-book-spine-obb` | [universe.roboflow.com/-b6bdz/book-spine-obb](https://universe.roboflow.com/-b6bdz/book-spine-obb) | `gdrive:dev/ml/raw/roboflow-book-spine-obb/book-spine-obb.v1-obb.yolov8-obb.zip` |
+| `open-shelves` | [universe.roboflow.com/capjamesg/open-shelves](https://universe.roboflow.com/capjamesg/open-shelves) | `gdrive:dev/ml/raw/open-shelves/open-shelves.v9i.yolov8-obb.zip` |
 
 When adding a raw source: write `SOURCE.md`, upload the zip to `drive_path`,
 keep only the sidecar under local `raw/<id>/`, add a row here.
@@ -71,7 +73,10 @@ Rebuildable trees under `derived/`. Pattern: `{lineage}_{format}`.
 |---|---|---|
 | `4tu-spines_yolo-obb` | raw `4tu-spines` | `tools/train_4tu_obb.py` |
 | `4tu-spines_createml` | raw `4tu-spines` | `tools/convert_4tu_to_createml.py` |
-| `4tu-ieee_yolo-obb` | `4tu-spines_yolo-obb` + raw `ieee-book-spine` | `tools/build_spines_dataset.py` |
+| `4tu-ieee_yolo-obb` | `4tu-spines_yolo-obb` + raw `ieee-book-spine` | `tools/build_spines_dataset.py --no-shelves --out …/4tu-ieee_yolo-obb` |
+| `4tu-ieee-shelves_yolo-obb` | 4TU + IEEE + cleaned open-shelves + roboflow | `tools/build_spines_dataset.py` (default) |
+| `open-shelves_yolo-obb` | raw `open-shelves` (+ RF pixels when better) | `tools/clean_roboflow_obb.py` |
+| `roboflow-book-spine-obb_yolo-obb` | raw `roboflow-book-spine-obb` | `tools/clean_roboflow_obb.py` |
 
 Each derived folder has a **`SOURCE.md`** (sources, script, git commit, flags,
 `built_at`) written by the prep script. Prefer encoding rot/tile/limit in that
@@ -117,6 +122,7 @@ Prep examples (fetch happens automatically):
 ```bash
 .venv/bin/python tools/build_spines_dataset.py --limit 20
 .venv/bin/python tools/train_4tu_obb.py --limit 3 --skip-train --skip-export
+.venv/bin/python tools/clean_roboflow_obb.py --dataset all
 ```
 
 ## Naming

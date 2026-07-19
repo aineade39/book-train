@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Train YOLO-OBB on the combined 4TU + IEEE spine dataset (see
-tools/build_spines_dataset.py) and export the result to Core ML.
+Train YOLO-OBB on the combined 4TU + IEEE + open-shelves + roboflow spine
+dataset (see tools/build_spines_dataset.py) and export the result to Core ML.
 
 Augmentation: degrees=90 + flipud=0.5 + fliplr=0.5 give the model rotated
 spines "for free" every epoch (validated to fix 90-degree horizontal stacks
@@ -16,6 +16,12 @@ Full run:
 
 Export only, from existing weights:
   python tools/train_combined_obb.py --skip-train --weights <path/to/best.pt>
+
+Resume an interrupted run (same run dir / optimizer state):
+  python tools/train_combined_obb.py --resume --model path/to/last.pt
+
+Continue from a finished checkpoint on new data (finetune, new run dir) — not resume:
+  python tools/train_combined_obb.py --model path/to/best.pt
 """
 
 from __future__ import annotations
@@ -62,9 +68,22 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--data-yaml",
         type=Path,
-        default=derived_dir("4tu-ieee_yolo-obb", "spines.yaml"),
+        default=derived_dir("4tu-ieee-shelves_yolo-obb", "spines.yaml"),
     )
-    p.add_argument("--model", default="yolo26s-obb.pt", help="Base checkpoint.")
+    p.add_argument(
+        "--model",
+        default="yolo26s-obb.pt",
+        help="Base checkpoint (.pt). For --resume, pass the run's weights/last.pt.",
+    )
+    p.add_argument(
+        "--resume",
+        action="store_true",
+        help=(
+            "Resume an interrupted Ultralytics run from --model (usually …/weights/last.pt). "
+            "Keeps optimizer/epoch state and the same run dir. Not for starting a new "
+            "finetune on updated data — drop --resume and pass --model best.pt instead."
+        ),
+    )
     p.add_argument("--imgsz", type=int, default=1024)
     p.add_argument("--epochs", type=int, default=120)
     # 30 is too aggressive for a 120-epoch run with close_mosaic=10: the smoke
@@ -72,7 +91,7 @@ def parse_args() -> argparse.Namespace:
     # transition (epoch 11/20). A plateau anywhere in the long mosaic-on phase
     # could early-stop the full run before it ever reaches that polish phase.
     p.add_argument("--patience", type=int, default=50)
-    p.add_argument("--batch", type=int, default=16)
+    p.add_argument("--batch", type=int, default=20)
     p.add_argument("--device", default="mps")
     p.add_argument("--cache", default="disk", help="False, 'ram', or 'disk'.")
     p.add_argument("--degrees", type=float, default=90.0)
@@ -106,6 +125,23 @@ def parse_args() -> argparse.Namespace:
         args.patience = 20
         if args.tag is None:
             args.tag = "smoke"
+
+    if args.resume:
+        model_path = Path(args.model)
+        if not model_path.is_file():
+            raise SystemExit(f"--resume requires an existing checkpoint file: {model_path}")
+        if model_path.name != "last.pt":
+            print(
+                f"Warning: --resume usually expects weights/last.pt (got {model_path.name}).",
+                file=sys.stderr,
+            )
+        # Keep writing into the same run dir as the checkpoint when --name omitted.
+        if args.name is None:
+            # …/<run_name>/weights/last.pt → <run_name>
+            if model_path.parent.name == "weights":
+                args.name = model_path.parent.parent.name
+            else:
+                raise SystemExit("--resume: pass --name <existing-run-dir> or a …/weights/last.pt path")
 
     if args.name is None:
         args.name = build_run_tag(args.data_yaml, args.model, args.imgsz, args.degrees, args.epochs, args.fraction)
@@ -151,22 +187,37 @@ def train(args: argparse.Namespace) -> Path:
     YOLO = ensure_ultralytics()
     args.runs_out.mkdir(parents=True, exist_ok=True)
     model = YOLO(args.model)
-    model.train(
-        data=str(args.data_yaml),
-        epochs=args.epochs,
-        patience=args.patience,
-        imgsz=args.imgsz,
-        batch=args.batch,
-        device=args.device,
-        cache=args.cache,
-        degrees=args.degrees,
-        flipud=args.flipud,
-        fliplr=args.fliplr,
-        fraction=args.fraction,
-        project=str(args.runs_out),
-        name=args.name,
-        exist_ok=True,
-    )
+    if args.resume:
+        # Ultralytics reloads optimizer / epoch / most args from the checkpoint.
+        # Re-pass device/batch/data so a laptop→GCE move (and relocated yaml) still works.
+        # Bump --epochs above the checkpoint's completed count to extend a finished run.
+        model.train(
+            resume=True,
+            data=str(args.data_yaml),
+            epochs=args.epochs,
+            batch=args.batch,
+            device=args.device,
+            project=str(args.runs_out),
+            name=args.name,
+            exist_ok=True,
+        )
+    else:
+        model.train(
+            data=str(args.data_yaml),
+            epochs=args.epochs,
+            patience=args.patience,
+            imgsz=args.imgsz,
+            batch=args.batch,
+            device=args.device,
+            cache=args.cache,
+            degrees=args.degrees,
+            flipud=args.flipud,
+            fliplr=args.fliplr,
+            fraction=args.fraction,
+            project=str(args.runs_out),
+            name=args.name,
+            exist_ok=True,
+        )
     weights_dir = args.runs_out / args.name / "weights"
     best = weights_dir / "best.pt"
     if not best.is_file():

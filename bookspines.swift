@@ -39,7 +39,18 @@ var imagePath: String? = nil
 var modelPath: String = {
     let root = ProcessInfo.processInfo.environment["BOOK_SPINES_DATA"]
         ?? NSString(string: "~/ml/book-spines").expandingTildeInPath
-    return "\(root)/models/production/SpineDetectorOBB-aug.mlpackage"
+    let production = "\(root)/models/production"
+    // Promote script installs a symlink at SpineDetectorOBB.mlpackage. Until
+    // then that name may still be a legacy real package — only follow it when
+    // it is a symlink; otherwise keep the frozen aug baseline as default.
+    let alias = "\(production)/SpineDetectorOBB.mlpackage"
+    let aug = "\(production)/SpineDetectorOBB-aug.mlpackage"
+    if let attrs = try? FileManager.default.attributesOfItem(atPath: alias),
+       let type = attrs[.type] as? FileAttributeType,
+       type == .typeSymbolicLink {
+        return alias
+    }
+    return aug
 }()
 var confThreshold: Float = 0.15
 var iouThreshold: Double = 0.45
