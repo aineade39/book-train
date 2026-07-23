@@ -16,7 +16,7 @@ import UniformTypeIdentifiers
 //   confidence filter -> map tile-local dets to full-image pixels ->
 //   single global rotated NMS -> (optional) perspective-crop + OCR
 //
-// Output: JSON on stdout + "<image>.spines.png" with oriented boxes drawn.
+// Output: JSON on stdout + "<image>.obb.jpg" with blue OBB overlays (no labels).
 //
 // Usage:
 //   swift bookspines.swift <image> [--model path.mlpackage] [--conf 0.15]
@@ -268,49 +268,89 @@ struct OBBDetection {
     }
 }
 
+// MARK: - Ultralytics-compatible letterbox + coord undo
+//
+// Matches ultralytics.data.augment.LetterBox (center, gray=114) and
+// ultralytics.utils.ops.scale_boxes (xywh=True, padding=True).
+
+struct LetterboxParams {
+    let gain: CGFloat
+    let padX: CGFloat
+    let padY: CGFloat
+    let newUnpadW: Int
+    let newUnpadH: Int
+}
+
+func ultralyticsLetterbox(imageW: CGFloat, imageH: CGFloat, modelW: Int, modelH: Int) -> LetterboxParams {
+    let gain = min(CGFloat(modelH) / imageH, CGFloat(modelW) / imageW)
+    let newUnpadW = Int(round(imageW * gain))
+    let newUnpadH = Int(round(imageH * gain))
+    let dw = CGFloat(modelW) - CGFloat(newUnpadW)
+    let dh = CGFloat(modelH) - CGFloat(newUnpadH)
+    let padX = CGFloat(round(dw / 2 - 0.1))
+    let padY = CGFloat(round(dh / 2 - 0.1))
+    return LetterboxParams(gain: gain, padX: padX, padY: padY, newUnpadW: newUnpadW, newUnpadH: newUnpadH)
+}
+
+func mapModelBoxToImage(
+    cxRaw: Float, cyRaw: Float, wRaw: Float, hRaw: Float, angle: Float, conf: Float,
+    letterbox: LetterboxParams, tileOriginX: CGFloat, tileOriginY: CGFloat
+) -> OBBDetection? {
+    let cx = (CGFloat(cxRaw) - letterbox.padX) / letterbox.gain + tileOriginX
+    let cy = (CGFloat(cyRaw) - letterbox.padY) / letterbox.gain + tileOriginY
+    let w = CGFloat(wRaw) / letterbox.gain
+    let h = CGFloat(hRaw) / letterbox.gain
+    guard w > 1, h > 1 else { return nil }
+    return OBBDetection(cx: cx, cy: cy, w: w, h: h, angle: CGFloat(angle), confidence: conf)
+}
+
 // MARK: - Per-tile inference: letterbox -> Core ML -> decode
 //
 // Supports both YOLO11 `[1,6,N]` (scan conf lane, then decode survivors) and
 // YOLO26 end2end `[1,300,7]` (up to 300 already-NMS'd rows; filter by conf).
 
-func runTileInference(tile cgTile: CGImage, tileOriginX: CGFloat, tileOriginY: CGFloat) -> ([OBBDetection], Double) {
+func letterboxedImage(from cgTile: CGImage, modelW: Int, modelH: Int) -> (CGImage, LetterboxParams)? {
     let tileW = CGFloat(cgTile.width)
     let tileH = CGFloat(cgTile.height)
-    let gain = min(CGFloat(inputW) / tileW, CGFloat(inputH) / tileH)
-    let scaledW = tileW * gain
-    let scaledH = tileH * gain
-    let padX = (CGFloat(inputW) - scaledW) / 2
-    let padY = (CGFloat(inputH) - scaledH) / 2
+    let letterbox = ultralyticsLetterbox(imageW: tileW, imageH: tileH, modelW: modelW, modelH: modelH)
+    let colorSpace = CGColorSpace(name: CGColorSpace.sRGB)!
+    let bitmapInfo = CGImageAlphaInfo.premultipliedLast.rawValue
+    guard let ctx = CGContext(data: nil, width: modelW, height: modelH,
+                              bitsPerComponent: 8, bytesPerRow: 0, space: colorSpace,
+                              bitmapInfo: bitmapInfo) else { return nil }
+    ctx.setFillColor(CGColor(red: 114 / 255, green: 114 / 255, blue: 114 / 255, alpha: 1))
+    ctx.fill(CGRect(x: 0, y: 0, width: modelW, height: modelH))
+    guard let resizedCtx = CGContext(data: nil,
+                                     width: letterbox.newUnpadW,
+                                     height: letterbox.newUnpadH,
+                                     bitsPerComponent: 8,
+                                     bytesPerRow: 0,
+                                     space: colorSpace,
+                                     bitmapInfo: bitmapInfo) else { return nil }
+    resizedCtx.interpolationQuality = .medium
+    resizedCtx.draw(cgTile, in: CGRect(x: 0, y: 0,
+                                       width: CGFloat(letterbox.newUnpadW),
+                                       height: CGFloat(letterbox.newUnpadH)))
+    guard let resized = resizedCtx.makeImage() else { return nil }
+    ctx.interpolationQuality = .medium
+    ctx.draw(resized, in: CGRect(x: letterbox.padX, y: letterbox.padY,
+                                 width: CGFloat(letterbox.newUnpadW),
+                                 height: CGFloat(letterbox.newUnpadH)))
+    guard let image = ctx.makeImage() else { return nil }
+    return (image, letterbox)
+}
 
-    var pixelBuffer: CVPixelBuffer?
-    CVPixelBufferCreate(kCFAllocatorDefault, inputW, inputH, kCVPixelFormatType_32BGRA,
-                        [kCVPixelBufferCGImageCompatibilityKey: true] as CFDictionary, &pixelBuffer)
-    guard let pixelBuffer else {
-        log("Error: could not allocate pixel buffer")
+func runTileInference(tile cgTile: CGImage, tileOriginX: CGFloat, tileOriginY: CGFloat) -> ([OBBDetection], Double) {
+    guard let (letterboxed, letterbox) = letterboxedImage(from: cgTile, modelW: inputW, modelH: inputH) else {
+        log("Error: could not letterbox tile")
         return ([], 0)
     }
-    CVPixelBufferLockBaseAddress(pixelBuffer, [])
-    if let ctx = CGContext(data: CVPixelBufferGetBaseAddress(pixelBuffer),
-                           width: inputW, height: inputH,
-                           bitsPerComponent: 8,
-                           bytesPerRow: CVPixelBufferGetBytesPerRow(pixelBuffer),
-                           space: CGColorSpace(name: CGColorSpace.sRGB)!,
-                           bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue
-                               | CGBitmapInfo.byteOrder32Little.rawValue) {
-        ctx.setFillColor(CGColor(red: 114 / 255, green: 114 / 255, blue: 114 / 255, alpha: 1))
-        ctx.fill(CGRect(x: 0, y: 0, width: inputW, height: inputH))
-        // CGContext origin is bottom-left; padY works out the same because the
-        // letterbox is vertically centered.
-        ctx.interpolationQuality = .high
-        ctx.draw(cgTile, in: CGRect(x: padX, y: padY, width: scaledW, height: scaledH))
-    }
-    CVPixelBufferUnlockBaseAddress(pixelBuffer, [])
 
     let started = Date()
     let prediction: MLFeatureProvider
     do {
-        let input = try MLDictionaryFeatureProvider(
-            dictionary: [inputName: MLFeatureValue(pixelBuffer: pixelBuffer)])
+        let feature = try MLFeatureValue(cgImage: letterboxed, constraint: imageConstraint, options: [:])
+        let input = try MLDictionaryFeatureProvider(dictionary: [inputName: feature])
         prediction = try model.prediction(from: input)
     } catch {
         log("Error: inference failed: \(error.localizedDescription)")
@@ -328,15 +368,6 @@ func runTileInference(tile cgTile: CGImage, tileOriginX: CGFloat, tileOriginY: C
     }
 
     let data = output.dataPointer.assumingMemoryBound(to: Float32.self)
-
-    func mapToImage(cxRaw: Float, cyRaw: Float, wRaw: Float, hRaw: Float, angle: Float, conf: Float) -> OBBDetection? {
-        let cx = (CGFloat(cxRaw) - padX) / gain + tileOriginX
-        let cy = (CGFloat(cyRaw) - padY) / gain + tileOriginY
-        let w = CGFloat(wRaw) / gain
-        let h = CGFloat(hRaw) / gain
-        guard w > 1, h > 1 else { return nil }
-        return OBBDetection(cx: cx, cy: cy, w: w, h: h, angle: CGFloat(angle), confidence: conf)
-    }
 
     var tileDetections: [OBBDetection] = []
 
@@ -356,9 +387,9 @@ func runTileInference(tile cgTile: CGImage, tileOriginX: CGFloat, tileOriginY: C
         survivors.reserveCapacity(256)
         if strideN == 1 {
             let confLane = UnsafeBufferPointer(start: data + confBase, count: anchors)
-            for i in 0..<anchors where confLane[i] >= confThreshold { survivors.append(i) }
+            for i in 0..<anchors where confLane[i] > confThreshold { survivors.append(i) }
         } else {
-            for i in 0..<anchors where data[confBase + i * strideN] >= confThreshold { survivors.append(i) }
+            for i in 0..<anchors where data[confBase + i * strideN] > confThreshold { survivors.append(i) }
         }
         tileDetections.reserveCapacity(survivors.count)
         for i in survivors {
@@ -368,7 +399,8 @@ func runTileInference(tile cgTile: CGImage, tileOriginX: CGFloat, tileOriginY: C
             let wRaw = data[2 * strideC + i * strideN]
             let hRaw = data[3 * strideC + i * strideN]
             let angle = data[5 * strideC + i * strideN]
-            if let det = mapToImage(cxRaw: cxRaw, cyRaw: cyRaw, wRaw: wRaw, hRaw: hRaw, angle: angle, conf: conf) {
+            if let det = mapModelBoxToImage(cxRaw: cxRaw, cyRaw: cyRaw, wRaw: wRaw, hRaw: hRaw, angle: angle, conf: conf,
+                                            letterbox: letterbox, tileOriginX: tileOriginX, tileOriginY: tileOriginY) {
                 tileDetections.append(det)
             }
         }
@@ -401,13 +433,14 @@ func runTileInference(tile cgTile: CGImage, tileOriginX: CGFloat, tileOriginY: C
         for i in 0..<rows {
             let base = i * rowStride
             let conf = data[base + 4 * featStride]
-            guard conf >= confThreshold else { continue }
+            guard conf > confThreshold else { continue }
             let cxRaw = data[base + 0 * featStride]
             let cyRaw = data[base + 1 * featStride]
             let wRaw = data[base + 2 * featStride]
             let hRaw = data[base + 3 * featStride]
             let angle = data[base + 6 * featStride]
-            if let det = mapToImage(cxRaw: cxRaw, cyRaw: cyRaw, wRaw: wRaw, hRaw: hRaw, angle: angle, conf: conf) {
+            if let det = mapModelBoxToImage(cxRaw: cxRaw, cyRaw: cyRaw, wRaw: wRaw, hRaw: hRaw, angle: angle, conf: conf,
+                                            letterbox: letterbox, tileOriginX: tileOriginX, tileOriginY: tileOriginY) {
                 tileDetections.append(det)
             }
         }
@@ -503,14 +536,14 @@ func rotatedIoU(_ a: OBBDetection, _ b: OBBDetection) -> CGFloat {
     return union > 0 ? interArea / union : 0
 }
 
-allCandidates.sort { $0.confidence > $1.confidence }
 var detections: [OBBDetection] = []
 let skipNMS = (OutputLayoutState.current == .end2endDetections) && tiles.count == 1
 if skipNMS {
-    // YOLO26 end2end already suppressed duplicates in-graph.
+    // YOLO26 end2end: keep model row order (matches ultralytics.utils.nms end2end path).
     detections = Array(allCandidates.prefix(maxDetections))
     log("\(detections.count) spines (end2end, NMS skipped; inference \(String(format: "%.0f", totalInferenceMs)) ms)")
 } else {
+    allCandidates.sort { $0.confidence > $1.confidence }
     for candidate in allCandidates {
         guard detections.count < maxDetections else { break }
         if !detections.contains(where: { rotatedIoU($0, candidate) > iouThreshold }) {
@@ -633,23 +666,33 @@ if let jsonData = try? encoder.encode(document), let json = String(data: jsonDat
     print(json)
 }
 
-// MARK: - Annotated image
+// MARK: - Annotated image (blue OBB polygons only — no confidence labels)
 
-let colorSpace = CGColorSpace(name: CGColorSpace.sRGB)!
-if let ctx = CGContext(data: nil, width: cgImage.width, height: cgImage.height,
-                       bitsPerComponent: 8, bytesPerRow: 0, space: colorSpace,
-                       bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) {
-    ctx.draw(cgImage, in: CGRect(x: 0, y: 0, width: imageW, height: imageH))
+func ultralyticsLineWidth(imageW: CGFloat, imageH: CGFloat) -> CGFloat {
+    max(CGFloat(round((imageW + imageH) / 2 * 0.003)), 2)
+}
 
-    // Detections use top-left-origin pixels; CGContext is bottom-left.
-    func flip(_ p: CGPoint) -> CGPoint { CGPoint(x: p.x, y: imageH - p.y) }
+func drawUltralyticsOBBOverlay(on baseImage: CGImage, detections: [OBBDetection], tiles: [Tile]) -> CGImage? {
+    let w = CGFloat(baseImage.width)
+    let h = CGFloat(baseImage.height)
+    let colorSpace = CGColorSpace(name: CGColorSpace.sRGB)!
+    guard let ctx = CGContext(data: nil, width: baseImage.width, height: baseImage.height,
+                              bitsPerComponent: 8, bytesPerRow: 0, space: colorSpace,
+                              bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return nil }
+    ctx.draw(baseImage, in: CGRect(x: 0, y: 0, width: w, height: h))
 
-    ctx.setLineWidth(max(3, imageW / 800))
-    for detection in detections {
-        // Green for high confidence, fading to red for low.
-        let t = CGFloat(min(max((detection.confidence - confThreshold) / (1 - confThreshold), 0), 1))
-        ctx.setStrokeColor(CGColor(red: 1 - t, green: t, blue: 0.1, alpha: 0.95))
+    func flip(_ p: CGPoint) -> CGPoint { CGPoint(x: p.x, y: h - p.y) }
+
+    let lw = ultralyticsLineWidth(imageW: w, imageH: h)
+    ctx.setLineWidth(lw)
+    ctx.setLineJoin(.round)
+    // Ultralytics class-0 color #042aff in BGR -> sRGB (4, 42, 255).
+    let boxColor = CGColor(red: 4 / 255, green: 42 / 255, blue: 1, alpha: 1)
+
+    // result.plot() draws reversed so higher-index boxes land on top.
+    for detection in detections.reversed() {
         let quad = detection.corners.map(flip)
+        ctx.setStrokeColor(boxColor)
         ctx.move(to: quad[0])
         for p in quad.dropFirst() { ctx.addLine(to: p) }
         ctx.closePath()
@@ -658,19 +701,23 @@ if let ctx = CGContext(data: nil, width: cgImage.width, height: cgImage.height,
 
     if tiles.count > 1 {
         ctx.setStrokeColor(CGColor(red: 0.2, green: 0.6, blue: 1, alpha: 0.6))
-        ctx.setLineWidth(max(2, imageW / 1500))
+        ctx.setLineWidth(max(2, w / 1500))
         for tile in tiles {
-            let r = CGRect(x: tile.rect.minX, y: imageH - tile.rect.maxY, width: tile.rect.width, height: tile.rect.height)
+            let r = CGRect(x: tile.rect.minX, y: h - tile.rect.maxY, width: tile.rect.width, height: tile.rect.height)
             ctx.stroke(r)
         }
     }
 
-    let outputURL = imageURL.deletingPathExtension().appendingPathExtension("spines.png")
-    if let annotated = ctx.makeImage(),
-       let destination = CGImageDestinationCreateWithURL(outputURL as CFURL,
-                                                         UTType.png.identifier as CFString, 1, nil) {
-        CGImageDestinationAddImage(destination, annotated, nil)
+    return ctx.makeImage()
+}
+
+if let annotated = drawUltralyticsOBBOverlay(on: cgImage, detections: detections, tiles: tiles) {
+    let obbURL = imageURL.deletingPathExtension().appendingPathExtension("obb.jpg")
+    if let destination = CGImageDestinationCreateWithURL(obbURL as CFURL,
+                                                         UTType.jpeg.identifier as CFString, 1, nil) {
+        let options = [kCGImageDestinationLossyCompressionQuality: 0.92] as CFDictionary
+        CGImageDestinationAddImage(destination, annotated, options)
         CGImageDestinationFinalize(destination)
-        log("Annotated image written to \(outputURL.path)")
+        log("Annotated image written to \(obbURL.path)")
     }
 }

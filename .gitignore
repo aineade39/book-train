@@ -15,3 +15,5 @@ models/
 out/
 scenes
 books.json
+.build/
+.swiftpm/
