@@ -35,3 +35,17 @@ def models_candidates(*parts: str | Path) -> Path:
 
 def eval_dir(*parts: str | Path) -> Path:
     return book_spines_data().joinpath("eval", *parts)
+
+
+def catalog_raw_ol(*parts: str | Path) -> Path:
+    """Open Library bulk dumps (see docs/BOOK_CATALOG.md)."""
+    return raw_dir("open-library", *parts)
+
+
+def catalog_dir(*parts: str | Path) -> Path:
+    """Derived book-catalog SQLite outputs and intermediate cache."""
+    return derived_dir("book-catalog", *parts)
+
+
+def catalog_intermediate(*parts: str | Path) -> Path:
+    return catalog_dir("intermediate", *parts)

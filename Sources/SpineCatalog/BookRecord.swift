@@ -26,11 +26,21 @@ public struct BookRecord: Codable, FetchableRecord, MutablePersistableRecord {
     /// indexes and what `LIKE` verification/fallback compares against.
     public var titleNormalized: String
     public var authorNormalized: String
+    /// Lower is more popular (OL edition-count rank). Optional — used for subset
+    /// rebuild ordering, not for matching (see docs/BOOK_CATALOG.md).
+    public var popularityRank: Int?
+    public var editionCount: Int?
 
     public static let databaseTableName = "books"
 
     public init(
-        id: Int64? = nil, workKey: String, title: String, author: String, isbn: String? = nil
+        id: Int64? = nil,
+        workKey: String,
+        title: String,
+        author: String,
+        isbn: String? = nil,
+        popularityRank: Int? = nil,
+        editionCount: Int? = nil
     ) {
         self.id = id
         self.workKey = workKey
@@ -39,6 +49,8 @@ public struct BookRecord: Codable, FetchableRecord, MutablePersistableRecord {
         self.isbn = isbn
         self.titleNormalized = normalizeForSearch(title)
         self.authorNormalized = normalizeForSearch(author)
+        self.popularityRank = popularityRank
+        self.editionCount = editionCount
     }
 
     public mutating func didInsert(_ inserted: InsertionSuccess) {

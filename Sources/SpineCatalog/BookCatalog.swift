@@ -89,6 +89,13 @@ public final class BookCatalog {
                 t.column("authorNormalized")
             }
         }
+        migrator.registerMigration("v2_catalog_metadata") { db in
+            try db.alter(table: "books") { t in
+                t.add(column: "popularityRank", .integer)
+                t.add(column: "editionCount", .integer)
+            }
+            try db.create(index: "books_popularityRank", on: "books", columns: ["popularityRank"])
+        }
         return migrator
     }
 
@@ -109,6 +116,48 @@ public final class BookCatalog {
         )
         try dbQueue.write { db in try record.insert(db) }
         return record.id!
+    }
+
+    /// One work row for bulk catalog builds (`catalog-build` OL mode).
+    public struct WorkInsert: Sendable {
+        public var workKey: String
+        public var title: String
+        public var author: String
+        public var isbn: String?
+        public var popularityRank: Int?
+        public var editionCount: Int?
+
+        public init(
+            workKey: String, title: String, author: String, isbn: String? = nil,
+            popularityRank: Int? = nil, editionCount: Int? = nil
+        ) {
+            self.workKey = workKey
+            self.title = title
+            self.author = author
+            self.isbn = isbn
+            self.popularityRank = popularityRank
+            self.editionCount = editionCount
+        }
+    }
+
+    /// Batch insert for large OL builds. Creates a fresh DB when `path` is new.
+    public func bulkInsert(_ rows: [WorkInsert], batchSize: Int = 5_000) throws -> Int {
+        guard !rows.isEmpty else { return 0 }
+        var inserted = 0
+        try dbQueue.write { db in
+            for chunkStart in stride(from: 0, to: rows.count, by: batchSize) {
+                let chunk = rows[chunkStart..<min(chunkStart + batchSize, rows.count)]
+                for row in chunk {
+                    var record = BookRecord(
+                        workKey: row.workKey, title: row.title, author: row.author, isbn: row.isbn,
+                        popularityRank: row.popularityRank, editionCount: row.editionCount
+                    )
+                    try record.insert(db)
+                    inserted += 1
+                }
+            }
+        }
+        return inserted
     }
 
     /// Default work key when the caller doesn't have a real work
@@ -152,6 +201,11 @@ public final class BookCatalog {
             // "does this column contain this substring" shape for the
             // trigram tokenizer); tokens are OR'd, not AND'd, so a mashed
             // OCR blob only needs one clean word to enter the shortlist.
+            //
+            // Must ORDER BY bm25: with OR + LIMIT on a large catalog,
+            // unranked FTS returns arbitrary early rowids that match any
+            // common token ("red", "the", …) and can drop the true hit
+            // (e.g. "suspenders") entirely out of the Stage-1 shortlist.
             let matchExpression = tokens
                 .map { "\"\($0.replacingOccurrences(of: "\"", with: "\"\""))\"" }
                 .joined(separator: " OR ")
@@ -159,6 +213,7 @@ public final class BookCatalog {
                 SELECT books.* FROM books_fts
                 JOIN books ON books.id = books_fts.rowid
                 WHERE books_fts MATCH ?
+                ORDER BY bm25(books_fts)
                 LIMIT ?
                 """
             let rows = try BookRecord.fetchAll(db, sql: sql, arguments: [matchExpression, limit])

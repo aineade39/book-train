@@ -122,4 +122,33 @@ final class BookCatalogTests: XCTestCase {
         }
         XCTAssertEqual(winner.candidate.title, "Project Hail Mary")
     }
+
+    func testBulkInsertPreservesFTS() throws {
+        let catalog = try makeCatalog()
+        let rows = [
+            BookCatalog.WorkInsert(workKey: "/works/OL1W", title: "Dune", author: "Frank Herbert", popularityRank: 1, editionCount: 2),
+            BookCatalog.WorkInsert(workKey: "/works/OL2W", title: "Dune Messiah", author: "Frank Herbert", popularityRank: 2, editionCount: 1),
+        ]
+        XCTAssertEqual(try catalog.bulkInsert(rows), 2)
+        let results = try catalog.retrieveCandidates(forQuery: "herbert")
+        XCTAssertGreaterThanOrEqual(results.count, 2)
+    }
+
+    /// Common OR-tokens must not starve distinctive title words out of the
+    /// shortlist — regression for unranked `LIMIT 50` FTS on ios_en.
+    func testBM25PrefersDistinctiveTitleOverCommonTokenFlood() throws {
+        let catalog = try makeCatalog()
+        try catalog.insert(title: "The Frogs Wore Red Suspenders", author: "Jack Prelutsky")
+        // Flood the catalog with books that match the common OCR token "red".
+        for i in 0..<80 {
+            try catalog.insert(title: "Red Book \(i)", author: "Someone \(i)")
+        }
+        let ocr = "SKY MATHERS THE FROGS WORE RED SUSPENDERS HARPERTROPHY"
+        let results = try catalog.retrieveCandidates(forQuery: ocr, limit: 50)
+        XCTAssertTrue(
+            results.contains { $0.title == "The Frogs Wore Red Suspenders" },
+            "expected BM25-ranked shortlist to include the distinctive title; got: \(results.prefix(5).map(\.title))"
+        )
+        XCTAssertEqual(results.first?.title, "The Frogs Wore Red Suspenders")
+    }
 }

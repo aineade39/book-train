@@ -71,6 +71,62 @@ final class CLIIntegrationTests: XCTestCase {
         XCTAssertNil(noMatchPayload.winner)
     }
 
+    func testOLIntermediateBuildThenBookMatch() throws {
+        guard let catalogBuildURL = Self.executableURL(named: "catalog-build") else {
+            throw XCTSkip("could not locate the built catalog-build executable next to the test bundle")
+        }
+        guard let bookMatchURL = Self.executableURL(named: "book-match") else {
+            throw XCTSkip("could not locate the built book-match executable next to the test bundle")
+        }
+
+        let repoRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let fixture = repoRoot.appendingPathComponent("Tests/fixtures/ol-mini")
+        guard FileManager.default.fileExists(atPath: fixture.path) else {
+            throw XCTSkip("ol-mini fixture missing")
+        }
+
+        let tmpDir = FileManager.default.temporaryDirectory.appendingPathComponent("catalog-ol-parity-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tmpDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tmpDir) }
+
+        let intermediate = tmpDir.appendingPathComponent("intermediate")
+        try FileManager.default.createDirectory(at: intermediate, withIntermediateDirectories: true)
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
+        process.arguments = [
+            repoRoot.appendingPathComponent("tools/catalog/process_ol.py").path,
+            "--raw-dir", fixture.path,
+            "--editions", fixture.appendingPathComponent("editions.jsonl").path,
+            "--works", fixture.appendingPathComponent("works.jsonl").path,
+            "--authors", fixture.appendingPathComponent("authors.jsonl").path,
+            "--out-dir", intermediate.path,
+            "--min-editions", "1",
+        ]
+        process.currentDirectoryURL = repoRoot
+        try process.run()
+        process.waitUntilExit()
+        XCTAssertEqual(process.terminationStatus, 0)
+
+        let dbURL = tmpDir.appendingPathComponent("catalog.sqlite")
+        let buildResult = try Self.run(catalogBuildURL, args: [
+            "--intermediate", intermediate.path,
+            "--output", dbURL.path,
+            "--languages", "eng",
+            "--min-editions", "1",
+        ])
+        XCTAssertEqual(buildResult.exitCode, 0, "catalog-build OL mode stderr: \(buildResult.stderr)")
+
+        let matchResult = try Self.run(bookMatchURL, args: ["project hail mary andy weir", "--db", dbURL.path, "--json"])
+        XCTAssertEqual(matchResult.exitCode, 0)
+        let payload = try JSONDecoder().decode(BookMatchResultJSON.self, from: Data(matchResult.stdout.utf8))
+        XCTAssertEqual(payload.decision, "auto-accept")
+        XCTAssertEqual(payload.winner?.title, "Project Hail Mary")
+    }
+
     // MARK: - Helpers (mirrors Tests/SpineCoreTests/ParityIntegrationTests.swift)
 
     private static func executableURL(named name: String) -> URL? {

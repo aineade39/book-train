@@ -94,6 +94,27 @@ swift test
 swift test --filter ParityIntegrationTests
 ```
 
+### Book catalog + match CLIs
+
+Canonical detail: [`docs/BOOK_CATALOG.md`](docs/BOOK_CATALOG.md).
+
+```bash
+# Fixture smoke (no OL download)
+python tools/build_book_catalog.py --profile dev_smoke --fixture Tests/fixtures/ol-mini
+
+# Full automated pipeline
+python tools/build_book_catalog.py --all --install-ios
+
+# CSV catalog (small lists)
+swift run -c release catalog-build catalog.csv --db /tmp/catalog.sqlite
+
+# Match harness (no photo/model)
+swift run -c release book-match "dune frank herbert" --db /tmp/catalog.sqlite --json
+
+# Full detect → OCR → match
+swift run -c release spine-id <image> --db /tmp/catalog.sqlite [--fm] [--json out.json]
+```
+
 Root [`bookspines.swift`](bookspines.swift) predates this package and is
 kept only as a compatibility reference; prefer `swift run bookspines`.
 Never commit `.build/`, `.swiftpm/`, generated crop images, overlays, or any

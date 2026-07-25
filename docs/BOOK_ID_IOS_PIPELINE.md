@@ -12,6 +12,7 @@ Related repo docs:
 | [`GEOMETRY.md`](../GEOMETRY.md) | OBB canonical type, coordinate spaces, conversion boundaries |
 | [`MODELS.md`](../MODELS.md) | Production spine detector, promotion / acceptance |
 | [`AGENTS.md`](../AGENTS.md) | Train/export commands, Swift package layout |
+| [`BOOK_CATALOG.md`](BOOK_CATALOG.md) | Open Library catalog build + bundle |
 
 ---
 

@@ -1,0 +1,22 @@
+{
+  "profiles": {
+    "full": {
+      "max_works": null,
+      "languages": [],
+      "min_editions": 1,
+      "description": "Mac — entire qualifying Open Library corpus"
+    },
+    "ios_en": {
+      "max_works": 250000,
+      "languages": ["eng"],
+      "min_editions": 2,
+      "description": "iOS bundle — English, popular works"
+    },
+    "dev_smoke": {
+      "max_works": 10000,
+      "languages": ["eng"],
+      "min_editions": 1,
+      "description": "CI / local dev smoke catalog"
+    }
+  }
+}

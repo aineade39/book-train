@@ -36,6 +36,8 @@ Script defaults resolve through `tools/paths.py` / `tools/fetch_raw.py`
 | Training runs | `runs/` |
 | Trial Core ML | `models/candidates/` |
 | Promoted Core ML | `models/production/` |
+| Open Library dumps | `raw/open-library/` + `SOURCE.md` |
+| Book catalog (SQLite) | `derived/book-catalog/` + per-profile `.json` sidecars |
 
 Nothing under the data root (or repo-local `models/`, `runs/`, `out/`, `*.pt`)
 is committed. See `.gitignore`.
@@ -77,6 +79,7 @@ Rebuildable trees under `derived/`. Pattern: `{lineage}_{format}`.
 | `4tu-ieee-shelves_yolo-obb` | 4TU + IEEE + cleaned open-shelves + roboflow | `tools/build_spines_dataset.py` (default) |
 | `open-shelves_yolo-obb` | raw `open-shelves` (+ RF pixels when better) | `tools/clean_roboflow_obb.py` |
 | `roboflow-book-spine-obb_yolo-obb` | raw `roboflow-book-spine-obb` | `tools/clean_roboflow_obb.py` |
+| `book-catalog` | raw `open-library` OL dumps | `tools/build_book_catalog.py` (see [`docs/BOOK_CATALOG.md`](docs/BOOK_CATALOG.md)) |
 
 Each derived folder has a **`SOURCE.md`** (sources, script, git commit, flags,
 `built_at`) written by the prep script. Prefer encoding rot/tile/limit in that
