@@ -124,15 +124,48 @@ public func cachedCompiledModelURL(for sourceURL: URL) throws -> URL {
     return cachedURL
 }
 
+/// Data root for models and datasets: `$BOOK_SPINES_DATA` or `~/ml/book-spines`.
+/// On the iOS Simulator the sandbox `~` is not the Mac home, so when the
+/// default path is missing we derive the host user from the CoreSimulator
+/// container path (`/Users/<you>/Library/Developer/CoreSimulator/...`).
+public func defaultBookSpinesDataRoot(override: String? = nil) -> String {
+    if let override { return override }
+    if let env = ProcessInfo.processInfo.environment["BOOK_SPINES_DATA"], !env.isEmpty {
+        return env
+    }
+    let sandboxDefault = NSString(string: "~/ml/book-spines").expandingTildeInPath
+    #if os(iOS) && targetEnvironment(simulator)
+    if !FileManager.default.fileExists(atPath: sandboxDefault),
+       let hostRoot = hostBookSpinesDataRootFromSimulatorHome(NSHomeDirectory()) {
+        return hostRoot
+    }
+    #endif
+    return sandboxDefault
+}
+
+/// Resolves `/Users/<macUser>/ml/book-spines` from a CoreSimulator app home.
+func hostBookSpinesDataRootFromSimulatorHome(
+    _ home: String,
+    fileExists: (String) -> Bool = { FileManager.default.fileExists(atPath: $0) }
+) -> String? {
+    let parts = home.split(separator: "/")
+    guard parts.count >= 4,
+          parts[0] == "Users",
+          parts[2] == "Library",
+          parts[3] == "Developer" else {
+        return nil
+    }
+    let hostRoot = "/Users/\(parts[1])/ml/book-spines"
+    return fileExists(hostRoot) ? hostRoot : nil
+}
+
 /// Default promoted export under `$BOOK_SPINES_DATA` (or `~/ml/book-spines`).
 /// Mirrors `bookspines.swift`'s original default-model resolution: follow
 /// the `SpineDetectorOBB.mlpackage` alias only once the promote script has
 /// retargeted it (i.e. only when it's actually a symlink); otherwise fall
 /// back to the frozen `SpineDetectorOBB-aug.mlpackage` baseline.
 public func defaultModelURL(dataRoot: String? = nil) -> URL {
-    let root = dataRoot
-        ?? ProcessInfo.processInfo.environment["BOOK_SPINES_DATA"]
-        ?? NSString(string: "~/ml/book-spines").expandingTildeInPath
+    let root = defaultBookSpinesDataRoot(override: dataRoot)
     let production = "\(root)/models/production"
     let alias = "\(production)/SpineDetectorOBB.mlpackage"
     let aug = "\(production)/SpineDetectorOBB-aug.mlpackage"
