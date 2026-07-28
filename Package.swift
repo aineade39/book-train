@@ -10,6 +10,7 @@ let package = Package(
         .library(name: "SpineMatching", targets: ["SpineMatching"]),
         .library(name: "SpineCatalog", targets: ["SpineCatalog"]),
         .library(name: "SpineReasoning", targets: ["SpineReasoning"]),
+        .library(name: "SpinePipeline", targets: ["SpinePipeline"]),
         .executable(name: "bookspines", targets: ["bookspines"]),
         .executable(name: "layout-crops", targets: ["layout-crops"]),
         .executable(name: "spine-read", targets: ["spine-read"]),
@@ -35,8 +36,11 @@ let package = Package(
         .target(name: "SpineMatching"),
 
         // Vision-backed OCR orientation routing, reading-order assembly,
-        // barcode, and capture/OCR quality gates.
-        .target(name: "SpinePerception", dependencies: ["SpineCore"]),
+        // barcode, and capture/OCR quality gates. Depends on SpineMatching
+        // (still no GRDB/FoundationModels) so it can hand off
+        // `SpineTextLine`s for role scoring / n-best confusion expansion
+        // without a third module owning the glue.
+        .target(name: "SpinePerception", dependencies: ["SpineCore", "SpineMatching"]),
 
         // GRDB + FTS5 trigram local catalog.
         .target(
@@ -50,6 +54,18 @@ let package = Package(
         // FoundationModels `@Generable` hard-case extraction, availability-gated.
         .target(name: "SpineReasoning", dependencies: ["SpineMatching"]),
 
+        // End-to-end detect -> isolate -> read -> normalize -> match ->
+        // accept orchestration -- the locked "Book ID OCR gains" plan §H
+        // ("spine-id: shared package APIs ... CLI and app call the same
+        // code"). Depends on every other library so `spine-id` and the
+        // iOS/macOS app's `SpineIdentificationPipeline` can both build a
+        // `SpineIdentificationEngine` instead of each re-implementing the
+        // barcode short circuit / detect / OCR / FM / match control flow.
+        .target(
+            name: "SpinePipeline",
+            dependencies: ["SpineCore", "SpinePerception", "SpineMatching", "SpineCatalog", "SpineReasoning"]
+        ),
+
         // MARK: - macOS CLIs (validation harnesses; mirror the existing
         // bookspines/layout-crops shape so every pipeline stage is
         // exercisable and testable on Mac before any iOS app work).
@@ -61,7 +77,7 @@ let package = Package(
         .executableTarget(name: "book-match", dependencies: ["SpineCatalog", "SpineMatching"]),
         .executableTarget(
             name: "spine-id",
-            dependencies: ["SpineCore", "SpinePerception", "SpineCatalog", "SpineMatching", "SpineReasoning"]
+            dependencies: ["SpineCore", "SpinePerception", "SpineCatalog", "SpineMatching", "SpineReasoning", "SpinePipeline"]
         ),
         .executableTarget(name: "ocr-quality-sweep", dependencies: ["SpineCore", "SpinePerception"]),
 
@@ -75,5 +91,6 @@ let package = Package(
             dependencies: ["SpineCatalog", .product(name: "GRDB", package: "GRDB.swift")]
         ),
         .testTarget(name: "SpineReasoningTests", dependencies: ["SpineReasoning"]),
+        .testTarget(name: "SpinePipelineTests", dependencies: ["SpinePipeline"]),
     ]
 )

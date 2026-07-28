@@ -5,6 +5,7 @@ import SpineCatalog
 import SpineCore
 import SpineMatching
 import SpinePerception
+import SpinePipeline
 import SpineReasoning
 
 // End-to-end detect -> isolate -> read -> normalize -> match -> confirm
@@ -13,6 +14,15 @@ import SpineReasoning
 // anchoring" habit should treat as the primary deliverable when a request
 // says "run/compare the pipeline" without naming a specific stage.
 //
+// Per the locked "Book ID OCR gains" plan §H ("spine-id: In scope --
+// shared package APIs for ISBN, role retrieve/rerank, accept; CLI and app
+// call the same code"), all of the actual detect/OCR/match orchestration
+// lives in `SpinePipeline.SpineIdentificationEngine` -- this file is just
+// argument parsing, image/catalog loading, and JSON serialization around
+// it. The iOS/macOS app's `SpineIdentificationPipeline` builds the exact
+// same engine and adapts its `SpinePipelineResult` to SwiftUI models
+// instead of JSON.
+//
 // Usage:
 //   swift run spine-id <image> --db <catalog.sqlite> [--model path.mlpackage] \
 //       [--conf 0.15] [--iou 0.45] [--max-det 500] \
@@ -20,11 +30,11 @@ import SpineReasoning
 //
 // `--fm` opts into the docs/BOOK_ID_IOS_PIPELINE.md §Foundation Models
 // enhancement: escalate a rate-limited subset of "hard case" (marginal
-// OCR quality score) spines to `SpineReasoningService`, using its cleaned
-// title+author as the match query instead of the raw OCR text. No-op
-// (falls back to plain OCR matching, same as without the flag) when the
-// OS/build doesn't have iOS/macOS 26+'s `FoundationModels` or the
-// on-device model isn't available -- see `SpineReasoningService.isAvailable`.
+// OCR quality score) spines to the on-device Foundation Model, using its
+// cleaned title+author as the match query instead of the raw OCR text.
+// No-op (falls back to plain OCR matching, same as without the flag) when
+// the OS/build doesn't have iOS/macOS 26+'s `FoundationModels` or the
+// on-device model isn't available (see `SpineReasoningService.isAvailable`).
 
 func fail(_ message: String) -> Never {
     FileHandle.standardError.write(Data((message + "\n").utf8))
@@ -102,30 +112,39 @@ do {
     fail("Could not load model: \(error)")
 }
 
-let detectionOptions = DetectionOptions(confidenceThreshold: confThreshold, iouThreshold: iouThreshold, maxDetections: maxDetections)
-var detections: [OBBDetection]
+let engine = SpineIdentificationEngine(
+    detector: detector,
+    detectionOptions: DetectionOptions(confidenceThreshold: confThreshold, iouThreshold: iouThreshold, maxDetections: maxDetections),
+    acceptPolicy: AcceptPolicy(acceptThreshold: acceptThreshold, marginThreshold: marginThreshold, topN: topN),
+    useFM: useFM
+)
+
+if useFM, #unavailable(iOS 26.0, macOS 26.0) {
+    log("--fm requested but this OS/build doesn't support FoundationModels; falling back to Vision-only")
+}
+
+let result: SpinePipelineResult
 do {
-    let result = try detector.predict(cgImage, options: detectionOptions)
-    detections = result.alreadyNMSed
-        ? Array(result.detections.prefix(maxDetections))
-        : nmsRotated(result.detections, iouThreshold: iouThreshold, maxDetections: maxDetections)
+    result = try await engine.run(on: cgImage, catalog: catalog)
 } catch {
-    fail("Inference failed: \(error)")
-}
-log("Detected \(detections.count) spines")
-
-// MARK: - Full-frame barcode fast path -- bypasses fuzzy match entirely for ISBN hits.
-
-let barcodeReader = VisionBarcodeReader()
-let barcodes = (try? barcodeReader.detectBarcodes(in: cgImage))?.filter(\.looksLikeISBN) ?? []
-if !barcodes.isEmpty {
-    log("ISBN barcode fast path: \(barcodes.map(\.payload).joined(separator: ", "))")
+    fail("Pipeline run failed: \(error)")
 }
 
-// MARK: - Per-spine: read -> normalize -> match -> accept
+if !result.isbnBarcodes.isEmpty {
+    log("ISBN barcode fast path: \(result.isbnBarcodes.joined(separator: ", "))")
+}
+log("Detected \(result.spines.count) spine\(result.spines.count == 1 ? "" : "s")")
+
+// MARK: - JSON output
 
 struct SpineResultJSON: Codable {
     let id: String
+    let cx: Double
+    let cy: Double
+    let w: Double
+    let h: Double
+    let angleDeg: Double
+    let detectionConfidence: Float
     let assembledText: String
     let ocrQualityScore: Double
     let passedOCRQualityGate: Bool
@@ -138,124 +157,74 @@ struct SpineResultJSON: Codable {
     let topCandidates: [String]
 }
 
-let router = OCROrientationRouter(recognizer: VisionTextRecognizer())
-let policy = AcceptPolicy(acceptThreshold: acceptThreshold, marginThreshold: marginThreshold, topN: topN)
-
-struct SpineOCRRecord {
-    let detection: OBBDetection
-    let assembledText: String
-    let qualityScore: Double
-    let passedQualityGate: Bool
-}
-
-var ocrRecords: [SpineOCRRecord] = []
-for det in detections {
-    guard let crop = uprightWarp(of: det, in: cgImage) else { continue }
-    guard let ocr = try? router.recognize(crop: crop, detection: det) else { continue }
-    ocrRecords.append(SpineOCRRecord(
-        detection: det, assembledText: ocr.assembledText, qualityScore: ocr.qualityScore,
-        passedQualityGate: ocr.passedQualityGate && !ocr.assembledText.isEmpty
-    ))
-}
-
-// MARK: - Optional FM escalation (hard cases only, rate-limited)
-//
-// Runs *after* the OCR quality gate but *before* matching, per
-// docs/BOOK_ID_IOS_PIPELINE.md's pipeline diagram
-// ("QualityGate -> [optional FM @Generable parse] -> Normalize -> ...").
-// A cleaned title+author (`SpineExtraction.matchQueryText`) replaces the
-// raw OCR text as the match query for escalated spines only; everything
-// else about matching is unchanged.
-
-@available(iOS 26.0, macOS 26.0, *)
-func runFMEscalation(records: [SpineOCRRecord], policy: FMEscalationPolicy) async -> [UUID: String] {
-    let service = SpineReasoningService()
-    guard service.isAvailable else {
-        log("--fm requested but no on-device Foundation Model is available; falling back to Vision-only")
-        return [:]
-    }
-    let passed = records.filter(\.passedQualityGate)
-    let scores = passed.map { (id: $0.detection.id, qualityScore: $0.qualityScore) }
-    let escalate = policy.selectForEscalation(scores: scores)
-    guard !escalate.isEmpty else { return [:] }
-    log("FM escalation: \(escalate.count) hard case(s) of \(passed.count) OCR-passed spine(s)")
-
-    var overrides: [UUID: String] = [:]
-    for record in passed where escalate.contains(record.detection.id) {
-        guard let extraction = await service.extract(from: record.assembledText) else { continue }
-        overrides[record.detection.id] = extraction.matchQueryText
-        log("  [\(record.detection.id.uuidString.prefix(8))] fm: \"\(record.assembledText)\" -> \"\(extraction.matchQueryText)\"")
-    }
-    return overrides
-}
-
-var fmQueryOverrides: [UUID: String] = [:]
-if useFM {
-    if #available(iOS 26.0, macOS 26.0, *) {
-        fmQueryOverrides = await runFMEscalation(records: ocrRecords, policy: .default)
-    } else {
-        log("--fm requested but this OS/build doesn't support FoundationModels; falling back to Vision-only")
-    }
-}
-
-// MARK: - Per-spine: normalize -> match -> accept
-
-var results: [SpineResultJSON] = []
-for record in ocrRecords {
-    let det = record.detection
-    guard record.passedQualityGate else {
-        results.append(SpineResultJSON(
-            id: det.id.uuidString, assembledText: record.assembledText, ocrQualityScore: record.qualityScore,
+func toJSON(_ spine: SpinePipelineSpine) -> SpineResultJSON {
+    let det = spine.detection
+    let base = (
+        id: spine.id.uuidString,
+        cx: det.cx, cy: det.cy, w: det.w, h: det.h,
+        angleDeg: det.angle * 180 / .pi,
+        detectionConfidence: det.conf,
+        assembledText: spine.assembledText,
+        ocrQualityScore: spine.ocrQualityScore,
+        margin: spine.matchMargin,
+        source: spine.source.rawValue
+    )
+    switch spine.decision {
+    case .didNotPassQualityGate:
+        return SpineResultJSON(
+            id: base.id, cx: base.cx, cy: base.cy, w: base.w, h: base.h,
+            angleDeg: base.angleDeg, detectionConfidence: base.detectionConfidence,
+            assembledText: base.assembledText, ocrQualityScore: base.ocrQualityScore,
             passedOCRQualityGate: false, decision: "no-match", matchedTitle: nil, matchedAuthor: nil,
-            score: nil, margin: nil, source: "ocr", topCandidates: []
-        ))
-        continue
-    }
-
-    let fmOverride = fmQueryOverrides[det.id]
-    let matchSource = fmOverride != nil ? "fm-assisted" : "ocr"
-    let normalizedQuery = normalizeForSearch(fmOverride ?? record.assembledText)
-    let candidates = (try? catalog.retrieveCandidates(forQuery: normalizedQuery)) ?? []
-    let scored = candidates.map {
-        ScoredCandidate(candidate: $0, score: tokenSetRatio(normalizedQuery, normalizeForSearch($0.searchableText)))
-    }
-    let decision = policy.decide(scored)
-
-    let result: SpineResultJSON
-    switch decision {
-    case .autoAccept(let winner):
-        result = SpineResultJSON(
-            id: det.id.uuidString, assembledText: record.assembledText, ocrQualityScore: record.qualityScore,
-            passedOCRQualityGate: true, decision: "auto-accept",
-            matchedTitle: winner.candidate.title, matchedAuthor: winner.candidate.author,
-            score: winner.score, margin: nil, source: matchSource, topCandidates: [winner.candidate.title]
+            score: nil, margin: nil, source: base.source, topCandidates: []
         )
-    case .ambiguous(let top):
-        result = SpineResultJSON(
-            id: det.id.uuidString, assembledText: record.assembledText, ocrQualityScore: record.qualityScore,
+    case .autoAccepted(let title, let author, let score):
+        log("  [\(spine.id.uuidString.prefix(8))] auto-accept: \"\(spine.assembledText)\" -> \(title)")
+        return SpineResultJSON(
+            id: base.id, cx: base.cx, cy: base.cy, w: base.w, h: base.h,
+            angleDeg: base.angleDeg, detectionConfidence: base.detectionConfidence,
+            assembledText: base.assembledText, ocrQualityScore: base.ocrQualityScore,
+            passedOCRQualityGate: true, decision: "auto-accept", matchedTitle: title, matchedAuthor: author,
+            score: score, margin: base.margin, source: base.source, topCandidates: [title]
+        )
+    case .needsConfirmation(let candidates):
+        log("  [\(spine.id.uuidString.prefix(8))] ambiguous: \"\(spine.assembledText)\" -> \(candidates.map(\.candidate.title))")
+        return SpineResultJSON(
+            id: base.id, cx: base.cx, cy: base.cy, w: base.w, h: base.h,
+            angleDeg: base.angleDeg, detectionConfidence: base.detectionConfidence,
+            assembledText: base.assembledText, ocrQualityScore: base.ocrQualityScore,
             passedOCRQualityGate: true, decision: "ambiguous", matchedTitle: nil, matchedAuthor: nil,
-            score: top.first?.score, margin: nil, source: matchSource, topCandidates: top.map(\.candidate.title)
+            score: candidates.first?.score, margin: base.margin, source: base.source,
+            topCandidates: candidates.map(\.candidate.title)
         )
     case .noMatch:
-        result = SpineResultJSON(
-            id: det.id.uuidString, assembledText: record.assembledText, ocrQualityScore: record.qualityScore,
+        return SpineResultJSON(
+            id: base.id, cx: base.cx, cy: base.cy, w: base.w, h: base.h,
+            angleDeg: base.angleDeg, detectionConfidence: base.detectionConfidence,
+            assembledText: base.assembledText, ocrQualityScore: base.ocrQualityScore,
             passedOCRQualityGate: true, decision: "no-match", matchedTitle: nil, matchedAuthor: nil,
-            score: nil, margin: nil, source: matchSource, topCandidates: []
+            score: nil, margin: base.margin, source: base.source, topCandidates: []
         )
     }
-    log("  [\(det.id.uuidString.prefix(8))] \(result.decision): \"\(record.assembledText)\" -> \(result.matchedTitle ?? "-")")
-    results.append(result)
 }
-
-// MARK: - JSON output
 
 struct PayloadJSON: Codable {
     let image: String
+    let captureSharpness: Double
+    let captureExposure: Double
+    let capturePassed: Bool
     let isbnBarcodes: [String]
     let spines: [SpineResultJSON]
 }
 
-let payload = PayloadJSON(image: imageURL.path, isbnBarcodes: barcodes.map(\.payload), spines: results)
+let payload = PayloadJSON(
+    image: imageURL.path,
+    captureSharpness: result.captureSharpness,
+    captureExposure: result.captureExposure,
+    capturePassed: result.capturePassed,
+    isbnBarcodes: result.isbnBarcodes,
+    spines: result.spines.map(toJSON)
+)
 let encoder = JSONEncoder()
 encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
 let data = try! encoder.encode(payload)

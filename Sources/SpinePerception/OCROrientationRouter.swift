@@ -2,6 +2,7 @@ import CoreGraphics
 import Foundation
 import ImageIO
 import SpineCore
+import SpineMatching
 
 // OCR orientation router per docs/BOOK_ID_IOS_PIPELINE.md §Text extraction /
 // §OCR orientation design: "guided two-pass with gated third pass, not
@@ -40,11 +41,33 @@ public struct SpineOCRResult {
     /// Reading-order-assembled text (see `assembleReadingOrder`), ready for
     /// `SpineMatching.normalizeForSearch` + catalog retrieval.
     public let assembledText: String
+    /// Same reading-order-sorted observations as `assembledText`, but kept
+    /// structured (crop-local geometry + kept alternates) for
+    /// `SpineRoleQueryBuilder` (§B geometry roles / §A n-best confusion).
+    public let lines: [SpineTextLine]
+    /// Title/author/general retrieval token pools + canonical rerank
+    /// query strings, built from `lines` once per winning pass so callers
+    /// never have to re-derive them.
+    public let roleQueries: SpineRoleQueries
     public let qualityScore: Double
     public let passedQualityGate: Bool
     /// Whether the gated `.down` fallback pass ran (both aspect-guided
     /// passes failed the quality gate).
     public let ranThirdPass: Bool
+
+    public init(
+        winningPass: OCRPassResult, assembledText: String, lines: [SpineTextLine] = [],
+        roleQueries: SpineRoleQueries = SpineRoleQueryBuilder.build(lines: []),
+        qualityScore: Double, passedQualityGate: Bool, ranThirdPass: Bool
+    ) {
+        self.winningPass = winningPass
+        self.assembledText = assembledText
+        self.lines = lines
+        self.roleQueries = roleQueries
+        self.qualityScore = qualityScore
+        self.passedQualityGate = passedQualityGate
+        self.ranThirdPass = ranThirdPass
+    }
 }
 
 public struct OCROrientationRouter {
@@ -104,12 +127,13 @@ public struct OCROrientationRouter {
         let runnerUp = ranked.count > 1 ? ranked[1] : nil
         let agreement = Self.orientationAgreement(best: best, runnerUp: runnerUp)
         let text = assembleReadingOrder(observations: best.observations, orientation: best.orientation, detection: detection)
+        let lines = buildOrderedTextLines(observations: best.observations, orientation: best.orientation, detection: detection)
         let inputs = OCRQualityGateInputs(
             meanConfidence: best.meanConfidence, orientationAgreement: agreement,
             assembledText: text, detectionConfidence: detection.conf
         )
         return SpineOCRResult(
-            winningPass: best, assembledText: text,
+            winningPass: best, assembledText: text, lines: lines, roleQueries: SpineRoleQueryBuilder.build(lines: lines),
             qualityScore: qualityGate.score(inputs), passedQualityGate: qualityGate.passes(inputs),
             ranThirdPass: ranThirdPass
         )
