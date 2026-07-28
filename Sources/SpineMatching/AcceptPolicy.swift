@@ -56,7 +56,17 @@ public struct AcceptPolicy {
     /// applies the score+margin test against the best distinct-work
     /// runner-up.
     public func decide<T: RankableCandidate>(_ scored: [ScoredCandidate<T>]) -> AcceptDecision<T> {
-        guard !scored.isEmpty else { return .noMatch }
+        decideWithMargin(scored).decision
+    }
+
+    /// Same decision as `decide(_:)`, plus the top-vs-runner-up-work
+    /// score gap that drove it (per the locked "Book ID OCR gains" plan
+    /// §rerank-telemetry: "emit margin") -- `nil` when there's no
+    /// distinct-work runner-up to measure against (a single-work
+    /// shortlist, or an empty one). `AcceptPolicy`'s own 90/8 accept rule
+    /// is unaffected by whether a caller reads this value.
+    public func decideWithMargin<T: RankableCandidate>(_ scored: [ScoredCandidate<T>]) -> AcceptOutcome<T> {
+        guard !scored.isEmpty else { return AcceptOutcome(decision: .noMatch, margin: nil) }
 
         var bestPerWork: [String: ScoredCandidate<T>] = [:]
         for sc in scored {
@@ -64,13 +74,25 @@ public struct AcceptPolicy {
             bestPerWork[sc.candidate.workKey] = sc
         }
         let ranked = bestPerWork.values.sorted { $0.score > $1.score }
-        guard let top = ranked.first else { return .noMatch }
+        guard let top = ranked.first else { return AcceptOutcome(decision: .noMatch, margin: nil) }
 
-        let runnerUpScore = ranked.count > 1 ? ranked[1].score : -Double.infinity
-        let margin = top.score - runnerUpScore
-        if top.score >= acceptThreshold && margin >= marginThreshold {
-            return .autoAccept(top)
+        let margin: Double? = ranked.count > 1 ? top.score - ranked[1].score : nil
+        if top.score >= acceptThreshold && (margin ?? .infinity) >= marginThreshold {
+            return AcceptOutcome(decision: .autoAccept(top), margin: margin)
         }
-        return .ambiguous(topCandidates: Array(ranked.prefix(topN)))
+        return AcceptOutcome(decision: .ambiguous(topCandidates: Array(ranked.prefix(topN))), margin: margin)
+    }
+}
+
+/// `decideWithMargin(_:)`'s result -- the decision plus the score gap
+/// that drove it, for telemetry/debugging without re-deriving it from
+/// the (already work-deduped, already sorted-away) candidate list.
+public struct AcceptOutcome<T: RankableCandidate> {
+    public let decision: AcceptDecision<T>
+    public let margin: Double?
+
+    public init(decision: AcceptDecision<T>, margin: Double?) {
+        self.decision = decision
+        self.margin = margin
     }
 }

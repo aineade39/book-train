@@ -88,4 +88,55 @@ final class AcceptPolicyTests: XCTestCase {
         XCTAssertEqual(top.count, 2)
         XCTAssertEqual(top.first?.candidate.workKey, "book-9")
     }
+
+    // MARK: - decideWithMargin (§rerank-telemetry: "emit margin")
+
+    func testDecideWithMarginMatchesPlainDecideOnEmptyInput() {
+        let outcome = policy.decideWithMargin([ScoredCandidate<FakeBook>]())
+        guard case .noMatch = outcome.decision else { return XCTFail("expected .noMatch") }
+        XCTAssertNil(outcome.margin)
+    }
+
+    func testDecideWithMarginReportsExactScoreGapOnAutoAccept() {
+        let candidates = [
+            ScoredCandidate(candidate: FakeBook(workKey: "dune", title: "Dune"), score: 96),
+            ScoredCandidate(candidate: FakeBook(workKey: "dune-messiah", title: "Dune Messiah"), score: 60),
+        ]
+        let outcome = policy.decideWithMargin(candidates)
+        guard case .autoAccept(let winner) = outcome.decision else { return XCTFail("expected .autoAccept") }
+        XCTAssertEqual(winner.candidate.workKey, "dune")
+        XCTAssertEqual(outcome.margin, 36)
+    }
+
+    func testDecideWithMarginIsNilWithNoDistinctWorkRunnerUp() {
+        let candidates = [
+            ScoredCandidate(candidate: FakeBook(workKey: "dune", title: "Dune (Mass Market)"), score: 96),
+            ScoredCandidate(candidate: FakeBook(workKey: "dune", title: "Dune (Hardcover)"), score: 95),
+        ]
+        let outcome = policy.decideWithMargin(candidates)
+        guard case .autoAccept = outcome.decision else { return XCTFail("expected .autoAccept") }
+        XCTAssertNil(outcome.margin, "same-work dedup leaves no distinct runner-up to measure a margin against")
+    }
+
+    func testDecideWithMarginReportsSmallGapOnAmbiguous() {
+        let candidates = [
+            ScoredCandidate(candidate: FakeBook(workKey: "a", title: "A"), score: 95),
+            ScoredCandidate(candidate: FakeBook(workKey: "b", title: "B"), score: 92),
+        ]
+        let outcome = policy.decideWithMargin(candidates)
+        guard case .ambiguous = outcome.decision else { return XCTFail("expected .ambiguous") }
+        XCTAssertEqual(outcome.margin, 3)
+    }
+
+    func testDecideAndDecideWithMarginAgreeOnTheDecision() {
+        let candidates = [
+            ScoredCandidate(candidate: FakeBook(workKey: "a", title: "A"), score: 70),
+            ScoredCandidate(candidate: FakeBook(workKey: "b", title: "B"), score: 20),
+        ]
+        guard case .ambiguous(let plainTop) = policy.decide(candidates) else { return XCTFail("expected .ambiguous") }
+        guard case .ambiguous(let withMarginTop) = policy.decideWithMargin(candidates).decision else {
+            return XCTFail("expected .ambiguous")
+        }
+        XCTAssertEqual(plainTop.map(\.candidate.workKey), withMarginTop.map(\.candidate.workKey))
+    }
 }
