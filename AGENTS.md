@@ -16,6 +16,23 @@ Data root: `$BOOK_SPINES_DATA` (default `$HOME/ml/book-spines`). Script defaults
 come from `tools/paths.py`. Raw dumps are Drive zips fetched by
 `tools/fetch_raw.py` (see `DATA.md`).
 
+## Python environment
+
+Dependencies are declared in `pyproject.toml` and pinned in `uv.lock`. Recreate
+a venv any time:
+
+```bash
+# Training / Ultralytics stack (Python 3.14)
+uv sync
+
+# Core ML export / rotation-sweep stack (Python 3.12, separate venv)
+UV_PROJECT_ENVIRONMENT=.venv-export uv sync --python 3.12 --group export
+```
+
+After `uv sync`, use `.venv/bin/python` (or `uv run python`) in the commands
+below. Commit changes to `pyproject.toml` when adding deps (`uv add …`); commit
+`uv.lock` after every lock update (`uv lock`).
+
 ## Commands
 
 Two venvs: `.venv` (train / Ultralytics), `.venv-export` (Core ML export / eval
