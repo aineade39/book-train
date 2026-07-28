@@ -1,4 +1,6 @@
 import Foundation
+import GRDB
+import SpineCatalog
 import XCTest
 
 /// Opt-in integration/golden test for the `catalog-build` and `book-match`
@@ -125,6 +127,25 @@ final class CLIIntegrationTests: XCTestCase {
         let payload = try JSONDecoder().decode(BookMatchResultJSON.self, from: Data(matchResult.stdout.utf8))
         XCTAssertEqual(payload.decision, "auto-accept")
         XCTAssertEqual(payload.winner?.title, "Project Hail Mary")
+
+        // --- §D book_isbns: OL isbns.jsonl.gz -> unique-ISBN lookup ---
+        let catalog = try BookCatalog(path: dbURL.path)
+        let isbnMatches = try catalog.lookupISBN("9780593135204")
+        XCTAssertEqual(isbnMatches.count, 1, "9780593135204 should map to exactly one work")
+        XCTAssertEqual(isbnMatches.first?.title, "Project Hail Mary")
+        XCTAssertTrue(
+            try catalog.lookupISBN("0000000000000").isEmpty,
+            "an ISBN absent from the fixture should return no matches, not an error"
+        )
+
+        // --- §C customWords: authors-only lexicon from the shipped rows ---
+        let customWords = try catalog.customWords()
+        XCTAssertTrue(customWords.contains("Weir"), "author name words should be in the customWords lexicon")
+        XCTAssertTrue(customWords.contains("Herbert"))
+        XCTAssertFalse(
+            customWords.contains { $0.lowercased() == "project" || $0.lowercased() == "hail" || $0.lowercased() == "mary" },
+            "customWords is authors-only -- title words must never appear"
+        )
     }
 
     // MARK: - Helpers (mirrors Tests/SpineCoreTests/ParityIntegrationTests.swift)

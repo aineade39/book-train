@@ -1,6 +1,7 @@
 import Foundation
 import GRDB
 import SpineCatalog
+import SpineMatching
 
 struct CatalogProfileFilters {
     var maxWorks: Int?
@@ -18,6 +19,11 @@ struct IntermediateWork: Decodable {
     let languages: [String]
 }
 
+struct IntermediateISBN: Decodable {
+    let isbn13: String
+    let workKey: String
+}
+
 enum CatalogOLBuild {
     static func buildFromIntermediate(
         intermediate: URL,
@@ -31,7 +37,29 @@ enum CatalogOLBuild {
         }
         let works = try readIntermediateWorks(from: worksFile)
         let rows = applyFilters(works, filters: filters)
-        try materialize(rows: rows, output: output, log: log)
+
+        // book_isbns (§D): populated from the OL `isbns.jsonl.gz`
+        // many-to-many mapping, scoped down to the workKeys actually
+        // shipped in this catalog build (maxWorks/language/minEditions
+        // filters can shrink `rows` well below the full intermediate).
+        var isbnRows: [(isbn13: String, workKey: String)] = []
+        let isbnsFile = intermediate.appendingPathComponent("isbns.jsonl.gz")
+        if FileManager.default.fileExists(atPath: isbnsFile.path) {
+            let shippedWorkKeys = Set(rows.map(\.workKey))
+            let allISBNs = try readIntermediateISBNs(from: isbnsFile)
+            // Re-validated/normalized through the single shared
+            // `SpineMatching.ISBN13` path rather than trusted verbatim
+            // from the Python intermediate (§H: shared match/ISBN APIs).
+            isbnRows = allISBNs.compactMap { row in
+                guard shippedWorkKeys.contains(row.workKey) else { return nil }
+                guard let isbn13 = ISBN13(rawPayload: row.isbn13) else { return nil }
+                return (isbn13: isbn13.value, workKey: row.workKey)
+            }
+        } else {
+            log("catalog-build: no isbns.jsonl.gz found at \(isbnsFile.path); book_isbns will be empty")
+        }
+
+        try materializeInserts(rows, isbns: isbnRows, output: output, log: log)
     }
 
     static func buildFromSubset(
@@ -55,7 +83,21 @@ enum CatalogOLBuild {
             ))
         }
         if let max = filters.maxWorks { inserts = Array(inserts.prefix(max)) }
-        try materializeInserts(inserts, output: output, log: log)
+
+        // Subset builds carry `book_isbns` forward from the source
+        // catalog, scoped to the workKeys kept after filtering.
+        let shippedWorkKeys = Set(inserts.map(\.workKey))
+        let isbnRows: [(isbn13: String, workKey: String)] = try sourceCatalog.dbQueue.read { db in
+            let rows = try Row.fetchAll(db, sql: "SELECT isbn13, workKey FROM book_isbns")
+            return rows.compactMap { row -> (isbn13: String, workKey: String)? in
+                let workKey: String = row["workKey"]
+                guard shippedWorkKeys.contains(workKey) else { return nil }
+                guard let isbn13 = ISBN13(rawPayload: row["isbn13"]) else { return nil }
+                return (isbn13: isbn13.value, workKey: workKey)
+            }
+        }
+
+        try materializeInserts(inserts, isbns: isbnRows, output: output, log: log)
     }
 
     private static func applyFilters(_ works: [IntermediateWork], filters: CatalogProfileFilters) -> [BookCatalog.WorkInsert] {
@@ -76,25 +118,48 @@ enum CatalogOLBuild {
         return out
     }
 
-    private static func materialize(rows: [BookCatalog.WorkInsert], output: URL, log: (String) -> Void) throws {
-        try materializeInserts(rows, output: output, log: log)
-    }
-
-    private static func materializeInserts(_ rows: [BookCatalog.WorkInsert], output: URL, log: (String) -> Void) throws {
+    private static func materializeInserts(
+        _ rows: [BookCatalog.WorkInsert],
+        isbns: [(isbn13: String, workKey: String)] = [],
+        output: URL,
+        log: (String) -> Void
+    ) throws {
         if FileManager.default.fileExists(atPath: output.path) {
             try FileManager.default.removeItem(at: output)
         }
         let catalog = try BookCatalog(path: output.path)
         let inserted = try catalog.bulkInsert(rows)
+
+        try catalog.insertISBNs(isbns)
+
+        // customWords lexicon (§C): authors-only, derived from the same
+        // popularity-ordered rows actually shipped in this build.
+        let authorEntries = rows.enumerated().map { index, row in
+            CustomWordsBuilder.AuthorEntry(author: row.author, popularityRank: row.popularityRank ?? index)
+        }
+        let customWords = CustomWordsBuilder.build(from: authorEntries)
+        try catalog.insertCustomWords(customWords)
+
         try catalog.dbQueue.writeWithoutTransaction { db in
             try db.execute(sql: "PRAGMA journal_mode=DELETE")
         }
         try catalog.dbQueue.vacuum()
         let bytes = (try? FileManager.default.attributesOfItem(atPath: output.path)[.size] as? Int64) ?? 0
-        log("catalog-build: inserted \(inserted) works, bytes=\(bytes), db=\(output.path)")
+        log(
+            "catalog-build: inserted \(inserted) works, \(isbns.count) isbns, "
+                + "\(customWords.count) customWords, bytes=\(bytes), db=\(output.path)"
+        )
     }
 
     private static func readIntermediateWorks(from url: URL) throws -> [IntermediateWork] {
+        try readGzippedJSONL(from: url)
+    }
+
+    private static func readIntermediateISBNs(from url: URL) throws -> [IntermediateISBN] {
+        try readGzippedJSONL(from: url)
+    }
+
+    private static func readGzippedJSONL<T: Decodable>(from url: URL) throws -> [T] {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/gunzip")
         process.arguments = ["-c", url.path]
@@ -108,12 +173,12 @@ enum CatalogOLBuild {
             throw NSError(domain: "catalog-build", code: 2, userInfo: [NSLocalizedDescriptionKey: "gunzip failed for \(url.path)"])
         }
         guard let text = String(data: data, encoding: .utf8) else { return [] }
-        var works: [IntermediateWork] = []
+        var rows: [T] = []
         let decoder = JSONDecoder()
         for line in text.split(separator: "\n", omittingEmptySubsequences: true) {
-            let row = try decoder.decode(IntermediateWork.self, from: Data(line.utf8))
-            works.append(row)
+            let row = try decoder.decode(T.self, from: Data(line.utf8))
+            rows.append(row)
         }
-        return works
+        return rows
     }
 }

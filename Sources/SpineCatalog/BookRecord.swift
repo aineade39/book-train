@@ -67,6 +67,10 @@ public struct CatalogCandidate: RankableCandidate, Equatable {
     public let title: String
     public let author: String
     public let isbn: String?
+    /// Lower is more popular (OL edition-count rank) -- feeds the
+    /// field-aware rerank's small popularity term (`SpineMatching.FieldAwareScore`).
+    /// `nil` for catalogs without OL metadata (CSV imports, tests).
+    public let popularityRank: Int?
 
     /// Concatenated display text, matching the "mashed title+author+
     /// publisher strings" shape a spine OCR blob is compared against.
@@ -78,5 +82,6 @@ public struct CatalogCandidate: RankableCandidate, Equatable {
         title = record.title
         author = record.author
         isbn = record.isbn
+        popularityRank = record.popularityRank
     }
 }

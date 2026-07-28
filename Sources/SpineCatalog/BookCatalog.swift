@@ -96,6 +96,23 @@ public final class BookCatalog {
             }
             try db.create(index: "books_popularityRank", on: "books", columns: ["popularityRank"])
         }
+        // v3 per the locked "Book ID OCR gains" plan §D/§C: `book_isbns`
+        // is a separate many-to-many ISBN -> work index (an ISBN can be
+        // shared by multiple works in rare OL data quality cases; a work
+        // can have many ISBNs across editions) rather than backfilling the
+        // existing single `books.isbn` display column. `custom_words` is
+        // the bundled authors-only Vision `customWords` lexicon (§C).
+        migrator.registerMigration("v3_isbns_and_custom_words") { db in
+            try db.create(table: "book_isbns") { t in
+                t.column("isbn13", .text).notNull()
+                t.column("workKey", .text).notNull()
+                t.primaryKey(["isbn13", "workKey"])
+            }
+            try db.create(index: "book_isbns_isbn13", on: "book_isbns", columns: ["isbn13"])
+            try db.create(table: "custom_words") { t in
+                t.column("word", .text).notNull().primaryKey()
+            }
+        }
         return migrator
     }
 
@@ -233,7 +250,7 @@ public final class BookCatalog {
     /// (initials, one-word titles under 3 chars) go straight to a
     /// prefix/`LIKE` scan of the content table instead of returning zero
     /// candidates.
-    private func shortReadFallback(query: String, limit: Int) throws -> [CatalogCandidate] {
+    func shortReadFallback(query: String, limit: Int) throws -> [CatalogCandidate] {
         try dbQueue.read { db in
             let prefixPattern = "\(query)%"
             let wordPrefixPattern = "% \(query)%"
@@ -247,6 +264,66 @@ public final class BookCatalog {
                 .limit(limit)
                 .fetchAll(db)
             return rows.map(CatalogCandidate.init)
+        }
+    }
+
+    // MARK: - ISBN side path (§D)
+
+    /// Bulk-populates `book_isbns` from the OL `isbns.jsonl.gz`
+    /// intermediate (built alongside `works.jsonl.gz` by
+    /// `tools/catalog/process_ol.py`). `(isbn13, workKey)` is the primary
+    /// key, so re-running a build is idempotent.
+    public func insertISBNs(_ rows: [(isbn13: String, workKey: String)], batchSize: Int = 5_000) throws {
+        guard !rows.isEmpty else { return }
+        try dbQueue.write { db in
+            for chunkStart in stride(from: 0, to: rows.count, by: batchSize) {
+                for row in rows[chunkStart..<min(chunkStart + batchSize, rows.count)] {
+                    try db.execute(
+                        sql: "INSERT OR IGNORE INTO book_isbns (isbn13, workKey) VALUES (?, ?)",
+                        arguments: [row.isbn13, row.workKey]
+                    )
+                }
+            }
+        }
+    }
+
+    /// Looks up every work associated with `isbn13` (an already-validated,
+    /// canonical `SpineMatching.ISBN13.value`). Per §D: a **unique** work
+    /// result short-circuits the whole detect/OCR/match pipeline; more
+    /// than one result means the barcode maps to multiple distinct works
+    /// (rare OL data-quality case) and the caller should present all of
+    /// them for confirmation rather than guessing.
+    public func lookupISBN(_ isbn13: String) throws -> [CatalogCandidate] {
+        try dbQueue.read { db in
+            let sql = """
+                SELECT DISTINCT books.* FROM book_isbns
+                JOIN books ON books.workKey = book_isbns.workKey
+                WHERE book_isbns.isbn13 = ?
+                ORDER BY books.popularityRank IS NULL, books.popularityRank ASC
+                """
+            let rows = try BookRecord.fetchAll(db, sql: sql, arguments: [isbn13])
+            return rows.map(CatalogCandidate.init)
+        }
+    }
+
+    // MARK: - customWords lexicon (§C)
+
+    /// Replaces the bundled `custom_words` table wholesale -- the catalog
+    /// build pipeline's authors-only Vision `customWords` lexicon (§C).
+    public func insertCustomWords(_ words: [String]) throws {
+        try dbQueue.write { db in
+            try db.execute(sql: "DELETE FROM custom_words")
+            for word in words {
+                try db.execute(sql: "INSERT OR IGNORE INTO custom_words (word) VALUES (?)", arguments: [word])
+            }
+        }
+    }
+
+    /// Reads the bundled `customWords` lexicon back out, for
+    /// `VisionTextRecognizer.customWords` at catalog-open time.
+    public func customWords() throws -> [String] {
+        try dbQueue.read { db in
+            try String.fetchAll(db, sql: "SELECT word FROM custom_words ORDER BY word")
         }
     }
 }
