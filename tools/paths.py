@@ -49,3 +49,12 @@ def catalog_dir(*parts: str | Path) -> Path:
 
 def catalog_intermediate(*parts: str | Path) -> Path:
     return catalog_dir("intermediate", *parts)
+
+
+def catalog_goodreads(*parts: str | Path) -> Path:
+    """Scraped Goodreads Listopia/book-page JSONL + the scrape checkpoint DB.
+
+    Rebuildable from scratch by re-running tools/scrape_goodreads_lists.py
+    (checkpointed, so a rebuild only re-fetches what isn't already `done`).
+    """
+    return catalog_dir("goodreads", *parts)

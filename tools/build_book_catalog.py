@@ -118,12 +118,28 @@ def main() -> int:
     args = parser.parse_args()
 
     profiles = load_profiles(PROFILES_PATH)
+    # Profiles with a `custom_build_script` (e.g. `ios_en_shelf`) need SQL
+    # mutation this generic subset-from path can't do (a per-work language
+    # filter on a subset build, Goodreads re-ranking/gap-fill — see
+    # tools/catalog/profiles.yaml's comment) and must be built by that
+    # script directly, never through here.
+    custom_build_profiles = {n for n, p in profiles.items() if p.get("custom_build_script")}
     if args.all:
-        names = ["full"] + [n for n in profiles if n != "full"]
+        names = ["full"] + [n for n in profiles if n != "full" and n not in custom_build_profiles]
     elif args.profile:
         names = args.profile
     else:
         names = ["ios_en"]
+
+    for name in names:
+        script = profiles.get(name, {}).get("custom_build_script")
+        if script:
+            print(
+                f"Profile '{name}' is built by `python {script}`, not build_book_catalog.py "
+                f"(see tools/catalog/profiles.yaml).",
+                file=sys.stderr,
+            )
+            return 1
 
     raw = args.fixture or catalog_raw_ol()
     intermediate = catalog_intermediate()

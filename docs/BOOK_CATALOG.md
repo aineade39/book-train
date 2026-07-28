@@ -59,6 +59,36 @@ $BOOK_SPINES_DATA/
 
 Profiles: [`tools/catalog/profiles.yaml`](../tools/catalog/profiles.yaml) (JSON mirror for stdlib-only).
 
+### `ios_en_shelf` (Goodreads-informed re-rank + gap-fill)
+
+Same shape as `ios_en`, but `popularityRank` is re-ranked (and gap-filled with a
+handful of popular-but-OL-absent titles) using Goodreads Listopia shelf signals
+instead of raw OL edition count alone — see `tools/scrape_goodreads_lists.py` /
+`tools/catalog/match_goodreads.py` / `tools/catalog/build_ios_en_from_goodreads.py`.
+
+Has a `custom_build_script` in profiles.yaml/json and is **not** built by
+`build_book_catalog.py` (that generic `--subset-from` path can't apply a language
+filter to a subset build at all, and knows nothing about Goodreads):
+
+```bash
+# One-time: build full.sqlite if it doesn't exist yet
+python tools/build_book_catalog.py --profile full --install-ios=false
+
+# Scrape (infrequent, checkpointed/restartable — see the script's docstring)
+python tools/scrape_goodreads_lists.py
+
+# Match scraped books against full.sqlite
+python tools/catalog/match_goodreads.py --ol-db $BOOK_SPINES_DATA/derived/book-catalog/full.sqlite \
+  --out $BOOK_SPINES_DATA/derived/book-catalog/goodreads/matched_goodreads.jsonl.gz
+
+# Rebuild ios_en_shelf.sqlite from a scratch copy of full.sqlite (never mutates full.sqlite itself)
+python tools/catalog/build_ios_en_from_goodreads.py \
+  --full-db $BOOK_SPINES_DATA/derived/book-catalog/full.sqlite \
+  --intermediate-dir $BOOK_SPINES_DATA/derived/book-catalog/intermediate \
+  --matched-goodreads $BOOK_SPINES_DATA/derived/book-catalog/goodreads/matched_goodreads.jsonl.gz \
+  --output $BOOK_SPINES_DATA/derived/book-catalog/ios_en_shelf.sqlite
+```
+
 ## Schema (v1 + metadata)
 
 Uses existing `books` + `books_fts` tables (`SpineCatalog` v1 migration). OL builds add

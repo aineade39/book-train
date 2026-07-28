@@ -15,7 +15,9 @@ from tools.catalog.ol_common import (  # noqa: E402
     build_work_rows,
     filter_work_rows,
     isbn10_to_13,
+    normalize_for_search,
     normalize_isbn13,
+    search_tokens,
 )
 
 
@@ -23,6 +25,36 @@ class TestISBN(unittest.TestCase):
     def test_isbn13_normalize(self) -> None:
         self.assertEqual(normalize_isbn13("978-0-441-01359-3"), "9780441013593")
         self.assertEqual(normalize_isbn13("9780441013593"), "9780441013593")
+
+
+class TestNormalizeForSearch(unittest.TestCase):
+    """Mirrors SpineMatchingTests' coverage of normalizeForSearch (Normalization.swift)."""
+
+    def test_lowercases_and_collapses_whitespace(self) -> None:
+        self.assertEqual(normalize_for_search("  Dune   Messiah  "), "dune messiah")
+
+    def test_diacritic_folds(self) -> None:
+        self.assertEqual(normalize_for_search("Émile Zola"), "emile zola")
+
+    def test_strips_decorative_punctuation(self) -> None:
+        self.assertEqual(normalize_for_search('The "Great" Gatsby (1925)!'), "the great gatsby 1925")
+
+    def test_keeps_meaningful_marks(self) -> None:
+        self.assertEqual(normalize_for_search("Jean-Paul O'Brien AT&T Vol. 2"), "jean-paul o'brien at&t vol. 2")
+
+    def test_empty_string(self) -> None:
+        self.assertEqual(normalize_for_search(""), "")
+
+    def test_matches_across_case_and_accents(self) -> None:
+        self.assertEqual(normalize_for_search("NAÏVE"), normalize_for_search("naive"))
+
+
+class TestSearchTokens(unittest.TestCase):
+    def test_splits_on_single_space(self) -> None:
+        self.assertEqual(search_tokens("dune messiah"), ["dune", "messiah"])
+
+    def test_empty_string_yields_no_tokens(self) -> None:
+        self.assertEqual(search_tokens(""), [])
 
 
 class TestOLMiniFixture(unittest.TestCase):

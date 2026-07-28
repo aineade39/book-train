@@ -1,0 +1,55 @@
+# Starting set of Goodreads Listopia lists to seed the shelf-score scrape.
+#
+# Every id/slug below was verified live (browsed directly, not guessed) in
+# July 2026 — see book_count for what was observed at that time; it will
+# have grown by the time this actually runs. Deliberately small and 100%
+# real rather than padded out to ~50 with plausible-looking guessed ids:
+# a wrong id either 404s or silently scrapes the wrong list, and the
+# `list_discovery` profile (scrape-harness sites/goodreads/profiles/
+# list_discovery.yaml) exists specifically to grow this set safely by
+# crawling /list/tag/{genre} pages instead of guessing. Run discovery for
+# genres you want more coverage of, review the results, then append here.
+#
+# tools/scrape_goodreads_lists.py reads this file; each entry maps directly
+# to `--set list_id=... --set slug=...` for the list_show profile.
+lists:
+  - list_id: 1
+    slug: Best_Books_Ever
+    genre: general
+    book_count_observed: 79001
+  - list_id: 3
+    slug: Best_Science_Fiction_Fantasy_Books
+    genre: scifi_fantasy
+    book_count_observed: 8772
+  - list_id: 15
+    slug: Best_Historical_Fiction
+    genre: historical_fiction
+    book_count_observed: 8038
+  - list_id: 348
+    slug: Thrillers
+    genre: thriller
+    book_count_observed: 4973
+  - list_id: 367
+    slug: Best_Fantasy_Books
+    genre: fantasy
+    book_count_observed: 1711
+  - list_id: 8329
+    slug: Best_Romance_Books_Ever
+    genre: romance
+    book_count_observed: 3342
+  - list_id: 8637
+    slug: Best_Young_Adult_Books_Fantasy_Historical_Fiction_etc_
+    genre: young_adult
+    book_count_observed: 100
+  - list_id: 11011
+    slug: Best_Classics_of_all_Time
+    genre: classics
+    book_count_observed: 71
+  - list_id: 19341
+    slug: Best_Science_Fiction
+    genre: scifi
+    book_count_observed: 3857
+  - list_id: 195574
+    slug: The_Most_Popular_Mysteries_on_Goodreads
+    genre: mystery
+    book_count_observed: 276

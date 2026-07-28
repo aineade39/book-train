@@ -5,6 +5,7 @@ from __future__ import annotations
 import gzip
 import json
 import re
+import unicodedata
 from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -24,6 +25,60 @@ def normalize_language(code: str | None) -> str | None:
     if code.startswith("/languages/"):
         code = code.rsplit("/", 1)[-1]
     return code or None
+
+
+# Python port of Sources/SpineMatching/Normalization.swift normalizeForSearch.
+# Keep the two in sync; see that file's header comment for the matching
+# rationale (fuzzy rerank tolerates variation, this only strips *decorative*
+# punctuation). Used here so Goodreads title/author strings are normalized
+# identically to how the iOS app normalizes catalog rows and OCR queries,
+# which is what match_goodreads.py's fuzzy fallback relies on.
+#
+# Caveat: Swift's `.folding(options: [.caseInsensitive, .diacriticInsensitive])`
+# is ICU-backed and not guaranteed bit-for-bit identical to this NFKD +
+# combining-mark-strip + lowercase approximation for every Unicode edge case
+# (rare scripts, some ligatures). Matches for all common Latin-script
+# title/author text, which is effectively all of this catalog.
+_DECORATIVE_PUNCTUATION = frozenset(
+    '"\u201c\u201d\u2018\u2019'
+    "()[]{}"
+    "!?;:,"
+    "*#@\u2013\u2014/\\_~`^|<>=+"
+)
+
+
+def _fold_case_and_diacritics(raw: str) -> str:
+    decomposed = unicodedata.normalize("NFKD", raw)
+    without_marks = "".join(ch for ch in decomposed if unicodedata.category(ch) != "Mn")
+    return without_marks.lower()
+
+
+def normalize_for_search(raw: str) -> str:
+    """Lowercase, diacritic-fold, collapse whitespace, strip decorative punctuation."""
+    folded = _fold_case_and_diacritics(raw)
+
+    out_chars: list[str] = []
+    last_was_space = False
+    for ch in folded:
+        if ch.isspace():
+            if not last_was_space and out_chars:
+                out_chars.append(" ")
+            last_was_space = True
+            continue
+        last_was_space = False
+        if ch in _DECORATIVE_PUNCTUATION:
+            continue
+        out_chars.append(ch)
+
+    result = "".join(out_chars)
+    if result.endswith(" "):
+        result = result[:-1]
+    return result
+
+
+def search_tokens(normalized: str) -> list[str]:
+    """Whitespace-separated tokens of an already-normalized string."""
+    return normalized.split(" ") if normalized else []
 
 
 def isbn10_checksum(digits: str) -> bool:
