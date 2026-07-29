@@ -29,6 +29,39 @@ public enum SpinePipelineSource: String, Equatable {
     case barcode
 }
 
+/// Named phases `run()` times, in execution order. Stable `rawValue`s so
+/// callers (the book-id-ios telemetry writer, or any future consumer) have
+/// a fixed key set rather than ad hoc strings -- see the Book ID Telemetry
+/// plan's `run.json` `phases` object, which uses these verbatim.
+public enum PipelinePhase: String, CaseIterable {
+    case barcodeScan
+    case detect
+    case ocr
+    case fmEscalation
+    case match
+    case barcodeOverride
+    case total
+}
+
+/// Forwards `denseShelfDetect`'s own `DenseShelfDetectionResult` fields --
+/// computed on every non-short-circuit run but previously dropped at the
+/// call site in `run()` -- so callers can tell single-shot from jigsaw
+/// detection and see whether the jigsaw pass actually found anything new.
+/// Purely additive/observational: nothing in this engine's own control
+/// flow branches on it after the fact.
+public struct DetectionMetadata: Equatable {
+    public let usedJigsaw: Bool
+    public let firstPassCount: Int
+    public let plannedCropCount: Int
+    public let newDetectionCount: Int
+
+    /// The barcode short-circuit path (§D "Unique work") never runs
+    /// detection at all -- this is what `SpinePipelineResult.detectionMetadata`
+    /// is set to for that case, rather than all-zero values that could be
+    /// misread as "detection ran and found nothing."
+    public static let notRun = DetectionMetadata(usedJigsaw: false, firstPassCount: 0, plannedCropCount: 0, newDetectionCount: 0)
+}
+
 /// One candidate presented on `.needsConfirmation`, with whatever score
 /// motivated its inclusion -- a fuzzy `matchRoleAware` rerank score, or a
 /// flat `100` for every candidate in a barcode-sourced multi-work ISBN hit
@@ -94,6 +127,18 @@ public struct SpinePipelineResult {
     public let capturePassed: Bool
     public let isbnBarcodes: [String]
     public let spines: [SpinePipelineSpine]
+    /// Which detection strategy actually ran -- see `DetectionMetadata`.
+    /// Additive field for monitoring/debugging telemetry (Book ID
+    /// Telemetry plan); no existing caller reads it.
+    public let detectionMetadata: DetectionMetadata
+    /// Wall-clock milliseconds per `PipelinePhase`, measured with plain
+    /// `ContinuousClock` reads wrapped around the existing sequential
+    /// calls below -- no callback/delegate API, just a few extra clock
+    /// reads around code that already runs. A phase absent from this dict
+    /// means it did not run for this frame (e.g. `fmEscalation` when
+    /// `useFM` is false, or every phase but `barcodeScan`/`total` on the
+    /// ISBN short-circuit path).
+    public let phaseTimingsMs: [String: Double]
 }
 
 /// A Foundation Model's cleaned title/author for one escalated spine (§G).
@@ -156,13 +201,28 @@ public final class SpineIdentificationEngine {
     }
 
     public func run(on image: CGImage, catalog: BookCatalog?) async throws -> SpinePipelineResult {
+        // Plain clock reads around each existing sequential stage --
+        // per the Book ID Telemetry plan §"No engine callback/delegate
+        // API," this is the entire timing mechanism: no sink threaded
+        // through `run()`, just a dictionary built up locally and
+        // returned once on `SpinePipelineResult.phaseTimingsMs`.
+        let clock = ContinuousClock()
+        let totalStart = clock.now
+        var phaseTimingsMs: [String: Double] = [:]
+
         // §D/§F: full-frame barcode detect runs first, ahead of the capture
         // gate -- "even if capture gate would fail" a unique ISBN hit must
         // still short-circuit straight to an accepted result.
+        let barcodeScanStart = clock.now
         let isbnHits = detectISBNHits(in: image, catalog: catalog)
+        phaseTimingsMs[PipelinePhase.barcodeScan.rawValue] = Self.milliseconds(from: barcodeScanStart, to: clock.now)
 
-        if let shortCircuit = uniqueWorkShortCircuit(isbnHits: isbnHits, image: image) {
-            return shortCircuit
+        if let hit = uniqueWorkShortCircuit(isbnHits: isbnHits, image: image) {
+            phaseTimingsMs[PipelinePhase.total.rawValue] = Self.milliseconds(from: totalStart, to: clock.now)
+            return SpinePipelineResult(
+                captureSharpness: 1, captureExposure: 1, capturePassed: true, isbnBarcodes: [hit.isbn13], spines: [hit.spine],
+                detectionMetadata: .notRun, phaseTimingsMs: phaseTimingsMs
+            )
         }
 
         let captureScore = captureGate.score(image)
@@ -184,6 +244,7 @@ public final class SpineIdentificationEngine {
         // tiled/jigsaw re-infer pass only once the shelf is dense enough
         // to risk neighbor bleed or missed spines (see `denseShelfDetect`
         // / docs/BOOK_ID_IOS_PIPELINE.md §Delivery sequencing step 2).
+        let detectStart = clock.now
         let denseResult = try denseShelfDetect(
             image: image,
             predict: { [detector, detectionOptions] img in try detector.predict(img, options: detectionOptions) },
@@ -191,6 +252,7 @@ public final class SpineIdentificationEngine {
             denseOptions: denseShelfOptions
         )
         let detections = denseResult.detections
+        phaseTimingsMs[PipelinePhase.detect.rawValue] = Self.milliseconds(from: detectStart, to: clock.now)
 
         // Build one OCR job per detection up front so the scheduler can
         // launch its visible-first (largest-area-first), capped-concurrency
@@ -201,9 +263,15 @@ public final class SpineIdentificationEngine {
             jobsByID[detection.id] = OCRJob(detection: detection, crop: crop)
         }
 
+        let ocrStart = clock.now
         let ocrResults = await runOCR(jobs: Array(jobsByID.values), catalog: catalog)
-        let fmQueryOverrides = await runFMEscalation(ocrResults: ocrResults)
+        phaseTimingsMs[PipelinePhase.ocr.rawValue] = Self.milliseconds(from: ocrStart, to: clock.now)
 
+        let fmStart = clock.now
+        let fmQueryOverrides = await runFMEscalation(ocrResults: ocrResults)
+        phaseTimingsMs[PipelinePhase.fmEscalation.rawValue] = Self.milliseconds(from: fmStart, to: clock.now)
+
+        let matchStart = clock.now
         var spines: [SpinePipelineSpine] = []
         for detection in detections {
             guard let ocr = ocrResults[detection.id] else { continue }
@@ -222,20 +290,36 @@ public final class SpineIdentificationEngine {
             // (`matchDecision` below) as any other spine.
             let fmOverride = fmQueryOverrides[detection.id]
             let queries = fmOverride.map { SpineRoleQueryBuilder.build(fmTitle: $0.title, fmAuthor: $0.author) } ?? ocr.roleQueries
-            let (decision, margin) = matchDecision(for: queries, catalog: catalog)
+            let (decision, margin) = try matchDecision(for: queries, catalog: catalog)
             spines.append(SpinePipelineSpine(
                 id: detection.id, detection: detection, assembledText: ocr.assembledText,
                 ocrQualityScore: ocr.qualityScore, decision: decision,
                 source: fmOverride != nil ? .fmAssisted : .ocr, matchMargin: margin
             ))
         }
+        phaseTimingsMs[PipelinePhase.match.rawValue] = Self.milliseconds(from: matchStart, to: clock.now)
 
+        let barcodeOverrideStart = clock.now
         spines = applyBarcodeSpineOverrides(isbnHits: isbnHits, detections: detections, image: image, spines: spines)
+        phaseTimingsMs[PipelinePhase.barcodeOverride.rawValue] = Self.milliseconds(from: barcodeOverrideStart, to: clock.now)
+        phaseTimingsMs[PipelinePhase.total.rawValue] = Self.milliseconds(from: totalStart, to: clock.now)
 
         return SpinePipelineResult(
             captureSharpness: captureScore.sharpness, captureExposure: captureScore.exposure,
-            capturePassed: capturePassed, isbnBarcodes: isbnHits.map(\.isbn13), spines: spines
+            capturePassed: capturePassed, isbnBarcodes: isbnHits.map(\.isbn13), spines: spines,
+            detectionMetadata: DetectionMetadata(
+                usedJigsaw: denseResult.usedJigsaw, firstPassCount: denseResult.firstPassCount,
+                plannedCropCount: denseResult.plannedCropCount, newDetectionCount: denseResult.newDetectionCount
+            ),
+            phaseTimingsMs: phaseTimingsMs
         )
+    }
+
+    /// `ContinuousClock.Instant.duration(to:)` as plain milliseconds --
+    /// the unit every telemetry schema in the Book ID Telemetry plan uses.
+    private static func milliseconds(from start: ContinuousClock.Instant, to end: ContinuousClock.Instant) -> Double {
+        let duration = start.duration(to: end)
+        return Double(duration.components.seconds) * 1000 + Double(duration.components.attoseconds) / 1_000_000_000_000_000
     }
 
     /// A full-frame barcode payload that decoded to a checksum-valid ISBN,
@@ -269,7 +353,7 @@ public final class SpineIdentificationEngine {
     /// (§D "Multi-work same ISBN") falls through to the normal pipeline,
     /// where `applyBarcodeSpineOverrides` gets another chance to resolve
     /// it once real spine geometry exists to associate against.
-    private func uniqueWorkShortCircuit(isbnHits: [ISBNHit], image: CGImage) -> SpinePipelineResult? {
+    private func uniqueWorkShortCircuit(isbnHits: [ISBNHit], image: CGImage) -> (spine: SpinePipelineSpine, isbn13: String)? {
         let distinctISBNs = Set(isbnHits.map(\.isbn13))
         guard distinctISBNs.count == 1, let hit = isbnHits.first, hit.candidates.count == 1 else { return nil }
         let winner = hit.candidates[0]
@@ -283,9 +367,7 @@ public final class SpineIdentificationEngine {
             decision: .autoAccepted(title: winner.title, author: winner.author, score: 100),
             source: .barcode, matchMargin: nil
         )
-        return SpinePipelineResult(
-            captureSharpness: 1, captureExposure: 1, capturePassed: true, isbnBarcodes: [hit.isbn13], spines: [spine]
-        )
+        return (spine, hit.isbn13)
     }
 
     /// §D "Spine association" + "vs OCR": once real detections exist,
@@ -445,11 +527,13 @@ public final class SpineIdentificationEngine {
     /// 90/8 by default; the margin `matchRoleAware` reports is surfaced
     /// for telemetry (§rerank-telemetry), not consumed by the decision
     /// itself.
-    private func matchDecision(for queries: SpineRoleQueries, catalog: BookCatalog?) -> (SpinePipelineDecision, Double?) {
+    private func matchDecision(for queries: SpineRoleQueries, catalog: BookCatalog?) throws -> (SpinePipelineDecision, Double?) {
+        // A nil catalog (not loaded, or a macOS --db/--catalog override that
+        // failed to resolve) is an expected "match against nothing" case,
+        // already surfaced separately via CatalogStore.lastError -- distinct
+        // from a genuine DB error below, so it returns rather than throws.
         guard let catalog else { return (.noMatch, nil) }
-        guard let outcome = try? catalog.matchRoleAware(queries, acceptPolicy: acceptPolicy) else {
-            return (.noMatch, nil)
-        }
+        let outcome = try catalog.matchRoleAware(queries, acceptPolicy: acceptPolicy)
         switch outcome.decision {
         case .autoAccept(let winner):
             return (.autoAccepted(title: winner.candidate.title, author: winner.candidate.author, score: winner.score), outcome.margin)
