@@ -159,6 +159,25 @@ final class BookCatalogISBNAndRoleRetrievalTests: XCTestCase {
         XCTAssertNil(outcome.margin)
     }
 
+    /// A genuine DB failure must throw, not look like `.noMatch` -- callers
+    /// (e.g. `SpineIdentificationEngine.matchDecision`) rely on this to
+    /// distinguish "no match found" from "the catalog is broken" and must
+    /// not swallow it with `try?`. Deleting the underlying file wouldn't
+    /// reliably reproduce a failure here: POSIX keeps an already-open file
+    /// descriptor (and `BookCatalog`'s `mmap_size` pragma) readable past
+    /// unlink, so dropping the FTS shadow table instead guarantees a real
+    /// "no such table" error on the next query, independent of OS/filesystem
+    /// behavior.
+    func testMatchRoleAwareThrowsOnDatabaseErrorInsteadOfReturningNoMatch() throws {
+        let catalog = try makeCatalog()
+        try catalog.insert(title: "Project Hail Mary", author: "Andy Weir")
+        try catalog.dbQueue.write { db in try db.execute(sql: "DROP TABLE books_fts") }
+
+        XCTAssertThrowsError(
+            try catalog.matchRoleAware(roleQueries(title: "Project Hail Mary", author: "Andy Weir"))
+        )
+    }
+
     /// §G: FM escalation output must flow through the exact same
     /// retrieve/rerank/accept path as geometry-derived queries.
     func testMatchRoleAwareAcceptsFMBuiltQueries() throws {

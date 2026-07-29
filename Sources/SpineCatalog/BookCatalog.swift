@@ -25,7 +25,13 @@ public enum SpineCatalogError: Error, CustomStringConvertible {
     }
 }
 
-public final class BookCatalog {
+// @unchecked: GRDB's `DatabaseQueue` (the only stored state) already
+// serializes all access onto its own internal dispatch queue, and every
+// `BookCatalog` method routes through `dbQueue.read`/`.write` -- so it's
+// safe to open/query from a background thread and hand the instance back
+// to another (e.g. `CatalogStore` opening a catalog off the main actor so
+// a multi-GB `full.sqlite` doesn't block the UI at launch).
+public final class BookCatalog: @unchecked Sendable {
     public let dbQueue: DatabaseQueue
 
     /// Trigram tokens need >= 3 characters to exist at all; below that,
@@ -34,7 +40,19 @@ public final class BookCatalog {
     public static let shortReadThreshold = 3
 
     public init(path: String) throws {
-        dbQueue = try DatabaseQueue(path: path)
+        // mmap_size/cache_size: read-performance pragmas only -- neither
+        // is persisted into the database file, both are safe to set on
+        // every open regardless of catalog size (a multi-GB `full.sqlite`
+        // benefits most, but a 95MB `ios_en.sqlite` isn't harmed). Cuts
+        // retrieval time further on top of the `rank`-ordering fix in
+        // `trigramRetrieve`/`BookCatalogRoleRetrieval.columnRetrieve`
+        // (measured ~3x additional reduction on a 39M-row catalog).
+        var config = Configuration()
+        config.prepareDatabase { db in
+            try db.execute(sql: "PRAGMA mmap_size = 268435456") // 256MB
+            try db.execute(sql: "PRAGMA cache_size = -100000") // ~100MB page cache
+        }
+        dbQueue = try DatabaseQueue(path: path, configuration: config)
         try Self.migrator.migrate(dbQueue)
     }
 
@@ -219,10 +237,20 @@ public final class BookCatalog {
             // trigram tokenizer); tokens are OR'd, not AND'd, so a mashed
             // OCR blob only needs one clean word to enter the shortlist.
             //
-            // Must ORDER BY bm25: with OR + LIMIT on a large catalog,
+            // Must ORDER BY rank: with OR + LIMIT on a large catalog,
             // unranked FTS returns arbitrary early rowids that match any
             // common token ("red", "the", …) and can drop the true hit
             // (e.g. "suspenders") entirely out of the Stage-1 shortlist.
+            // Use the literal `rank` keyword, not `bm25(books_fts)` --
+            // both compute the identical bm25 score (verified: byte-
+            // identical top results on a 39M-row catalog), but `rank` is
+            // FTS5's special-cased top-K path (bounded heap), while
+            // `bm25(books_fts)` is an opaque scalar function call that
+            // forces SQLite to score *every* matching row before it can
+            // sort and apply LIMIT. On a large catalog with a common
+            // token that's the difference between ~10s and a full table
+            // scan taking 30-60s per query -- do not "simplify" this back
+            // to an explicit bm25() call.
             let matchExpression = tokens
                 .map { "\"\($0.replacingOccurrences(of: "\"", with: "\"\""))\"" }
                 .joined(separator: " OR ")
@@ -230,7 +258,7 @@ public final class BookCatalog {
                 SELECT books.* FROM books_fts
                 JOIN books ON books.id = books_fts.rowid
                 WHERE books_fts MATCH ?
-                ORDER BY bm25(books_fts)
+                ORDER BY rank
                 LIMIT ?
                 """
             let rows = try BookRecord.fetchAll(db, sql: sql, arguments: [matchExpression, limit])

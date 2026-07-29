@@ -1,12 +1,21 @@
 import Foundation
 
-// Fixed English stopword list for `CustomWordsBuilder`, per the locked
-// "Book ID OCR gains" plan §C: "ship a fixed English list of <= 200 words
-// in package resources... used only when building custom_words, not at
-// OCR match time." Kept as a Swift source constant (not a bundled text
-// resource) -- same effect, no `Bundle.module` resource-loading surface
-// for a fixed ~150-word list that only ever changes alongside this file.
-public let englishStopwordsForCustomWords: Set<String> = [
+// Fixed English stopword list, originally for `CustomWordsBuilder` per the
+// locked "Book ID OCR gains" plan §C: "ship a fixed English list of <= 200
+// words in package resources." Kept as a Swift source constant (not a
+// bundled text resource) -- same effect, no `Bundle.module`
+// resource-loading surface for a fixed ~150-word list that only ever
+// changes alongside this file.
+//
+// Also reused (as of the catalog match-speed fix) by
+// `BookCatalogRoleRetrieval.columnRetrieve` to drop near-zero-information
+// tokens from FTS `MATCH` expressions before querying -- a token like
+// "the" can match millions of rows in a large catalog, and filtering it
+// out shrinks the row count `ORDER BY rank` has to score, on top of that
+// fix. Deliberately the *same* list rather than a second one to maintain:
+// a word too common to be useful in the `custom_words` Vision lexicon is
+// equally too common to be a useful catalog search term.
+public let englishStopwords: Set<String> = [
     "a", "an", "the", "and", "or", "but", "nor", "for", "so", "yet",
     "of", "in", "on", "at", "by", "to", "from", "with", "without", "into",
     "onto", "over", "under", "up", "down", "off", "out", "about", "above",

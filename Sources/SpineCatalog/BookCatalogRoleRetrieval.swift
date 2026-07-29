@@ -11,6 +11,12 @@ import SpineMatching
 // SQL side: per-pass column-scoped MATCH, union-by-work-id keeping the
 // best rank across passes, and the empty-shortlist fallbacks.
 extension BookCatalog {
+    /// Below this many candidates already found by the title/author
+    /// passes, the general (unscoped, most expensive) pass still runs to
+    /// widen coverage; at or above it, the pool is considered healthy
+    /// enough that the general pass's cost isn't worth paying.
+    static let generalPassSkipThreshold = 20
+
     /// Runs the title/author/general passes, unions their results by
     /// catalog row id (keeping each row's best cross-pass rank), and caps
     /// the result at `shortlistCap`. Falls back to a wider unscoped pool,
@@ -32,7 +38,14 @@ extension BookCatalog {
         if !queries.authorTokens.isEmpty {
             merge(try columnRetrieve(tokens: queries.authorTokens.map(\.token), columns: ["authorNormalized"], limit: 50))
         }
-        if !queries.generalTokens.isEmpty {
+        // The general pass is unscoped (both columns), so it can't
+        // benefit from column-scoped MATCH the way title/author passes
+        // do -- it's the most expensive of the three on a large catalog.
+        // Its purpose is widening coverage when title/author came up
+        // thin; skip it once they've already produced a healthy pool
+        // (`Self.generalPassSkipThreshold`) rather than always paying for
+        // a wider query that's largely redundant at that point.
+        if !queries.generalTokens.isEmpty, ranked.count < Self.generalPassSkipThreshold {
             merge(try columnRetrieve(tokens: queries.generalTokens.map(\.token), columns: nil, limit: 30))
         }
 
@@ -60,8 +73,17 @@ extension BookCatalog {
 
     private func columnRetrieve(tokens: [String], columns: [String]?, limit: Int) throws -> [CatalogCandidate] {
         guard !tokens.isEmpty else { return [] }
+        // Drop near-zero-information stopwords ("the", "and", ...) before
+        // querying -- a common token like "the" can match millions of
+        // rows in a large catalog, and every row matched is a row `ORDER
+        // BY rank` must score. Never let this empty the token list: if
+        // every token happens to be a stopword (rare, but possible for a
+        // very short/degenerate OCR read), fall back to the unfiltered
+        // set rather than sending a query that can't match anything.
+        let stopwordFiltered = tokens.filter { !englishStopwords.contains($0) }
+        let effectiveTokens = stopwordFiltered.isEmpty ? tokens : stopwordFiltered
         return try dbQueue.read { db in
-            let phrases = tokens.map { "\"\($0.replacingOccurrences(of: "\"", with: "\"\""))\"" }
+            let phrases = effectiveTokens.map { "\"\($0.replacingOccurrences(of: "\"", with: "\"\""))\"" }
             let matchExpression: String
             if let columns, !columns.isEmpty {
                 matchExpression = phrases
@@ -70,11 +92,18 @@ extension BookCatalog {
             } else {
                 matchExpression = phrases.joined(separator: " OR ")
             }
+            // `rank`, not `bm25(books_fts)`: identical bm25 score (verified
+            // byte-identical top results on a 39M-row catalog), but `rank`
+            // is FTS5's special-cased top-K path (bounded heap) instead of
+            // an opaque scalar function call that forces scoring every
+            // matching row before LIMIT can apply -- ~10-20x faster on a
+            // large catalog with a common token. See `BookCatalog.swift`'s
+            // `trigramRetrieve` for the same note.
             let sql = """
                 SELECT books.* FROM books_fts
                 JOIN books ON books.id = books_fts.rowid
                 WHERE books_fts MATCH ?
-                ORDER BY bm25(books_fts)
+                ORDER BY rank
                 LIMIT ?
                 """
             let rows = try BookRecord.fetchAll(db, sql: sql, arguments: [matchExpression, limit])
@@ -88,7 +117,7 @@ extension BookCatalog {
             let verified = rows.filter { record in
                 let titleWords = Set(searchTokens(record.titleNormalized))
                 let authorWords = Set(searchTokens(record.authorNormalized))
-                return tokens.contains { token in
+                return effectiveTokens.contains { token in
                     let matchesTitle = titleWords.contains(token)
                     let matchesAuthor = authorWords.contains(token)
                     guard let columns, !columns.isEmpty else { return matchesTitle || matchesAuthor }

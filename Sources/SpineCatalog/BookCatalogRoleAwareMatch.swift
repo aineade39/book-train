@@ -15,6 +15,13 @@ extension BookCatalog {
     /// with the winning margin surfaced for telemetry (§rerank-telemetry:
     /// "emit margin"; `AcceptPolicy`'s own 90/8 rule is unchanged either
     /// way).
+    ///
+    /// - Important: An empty shortlist is a normal outcome and surfaces as
+    ///   `AcceptOutcome.noMatch` -- not thrown. A GRDB/SQLite failure (a
+    ///   corrupt DB, disk I/O error, etc.) *does* throw here and callers
+    ///   must let it propagate (`try`, not `try?`); silently converting it
+    ///   into `.noMatch` is indistinguishable from a genuine miss and hides
+    ///   real failures from telemetry and the UI.
     public func matchRoleAware(
         _ queries: SpineRoleQueries,
         acceptPolicy: AcceptPolicy = AcceptPolicy(),
