@@ -96,6 +96,26 @@ def load_seed_lists(path: Path) -> list[SeedList]:
     ]
 
 
+def load_deprecated_list_ids(path: Path) -> set[int]:
+    """Reads `seed_list_overrides.yaml` (written by
+    `tools/catalog/analyze_goodreads_lists.py --apply-deprecations`) ->
+    the set of list_ids marked `curation_status: deprecated`. A missing
+    file means nothing is deprecated — never an error, since this file is
+    entirely optional and this repo doesn't require the analysis tool to
+    have ever been run."""
+    if not path.exists():
+        return set()
+    import yaml
+
+    data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    overrides = data.get("overrides") or {}
+    return {
+        int(list_id)
+        for list_id, entry in overrides.items()
+        if str((entry or {}).get("curation_status")) == "deprecated"
+    }
+
+
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
@@ -303,6 +323,21 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--report-only", action="store_true", help="Print checkpoint status and exit; no scraping.")
     parser.add_argument(
+        "--skip-deprecated",
+        action="store_true",
+        help=(
+            "Skip list_ids marked curation_status: deprecated in --overrides "
+            "(see tools/catalog/analyze_goodreads_lists.py). Off by default — "
+            "existing scrape runs are unaffected unless you opt in."
+        ),
+    )
+    parser.add_argument(
+        "--overrides",
+        type=Path,
+        default=None,
+        help="Default: catalog_goodreads('seed_list_overrides.yaml'). Only read when --skip-deprecated is set.",
+    )
+    parser.add_argument(
         "--redo-list",
         type=int,
         action="append",
@@ -332,6 +367,20 @@ def main(argv: list[str] | None = None) -> int:
             return 0
 
         pending = list(checkpoint.pending_lists(args.max_attempts))
+
+        if args.skip_deprecated:
+            overrides_path = args.overrides or catalog_goodreads("seed_list_overrides.yaml")
+            deprecated_ids = load_deprecated_list_ids(overrides_path)
+            if deprecated_ids:
+                before = len(pending)
+                pending = [row for row in pending if row["list_id"] not in deprecated_ids]
+                skipped = before - len(pending)
+                if skipped:
+                    print(
+                        f"[goodreads] --skip-deprecated: skipping {skipped} list(s) "
+                        f"marked deprecated (see {overrides_path})"
+                    )
+
         if not pending:
             print("[goodreads] nothing pending (all lists done, or attempts exhausted) — see --report-only")
             return 0

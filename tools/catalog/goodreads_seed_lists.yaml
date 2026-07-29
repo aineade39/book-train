@@ -12,10 +12,22 @@
 #
 # tools/scrape_goodreads_lists.py reads this file; each entry maps directly
 # to `--set list_id=... --set slug=...` for the list_show profile.
+#
+# `list_type` (optional, defaults to `genre` when omitted) is read by
+# tools/catalog/analyze_goodreads_lists.py: `anchor` marks the single broad
+# popularity list that's always kept regardless of overlap; see
+# docs/BOOK_CATALOG.md's "Curating Goodreads seed lists" section.
+#
+# `short_label`/`list_title` (both optional) are read by
+# tools/catalog/match_goodreads.py's load_seed_metadata() to build
+# genre_tags.json (tag -> display name). Omitted entries fall back to a
+# title-cased `genre` and an underscore-to-space'd `slug`, respectively —
+# no edits required for existing entries.
 lists:
   - list_id: 1
     slug: Best_Books_Ever
     genre: general
+    list_type: anchor
     book_count_observed: 79001
   - list_id: 3
     slug: Best_Science_Fiction_Fantasy_Books

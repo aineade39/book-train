@@ -8,7 +8,9 @@ schema.
 
 from __future__ import annotations
 
+import contextlib
 import gzip
+import io
 import json
 import sqlite3
 import sys
@@ -25,12 +27,15 @@ from tools.catalog.match_goodreads import (  # noqa: E402
     AuthorBlockIndex,
     GoodreadsBook,
     OLCandidate,
+    SeedListMeta,
     author_block_key,
+    build_genre_tag_mapping,
     compute_shelf_score,
     dedupe_books,
     load_book_show_isbns,
     load_ol_candidates,
     load_ol_isbn_index,
+    load_seed_metadata,
     match_book,
     parse_book_id,
     parse_book_show_next_data,
@@ -183,6 +188,95 @@ class TestDedupeBooks(unittest.TestCase):
         b = GoodreadsBook(book_id=2, title="B", author="Y")
         merged = dedupe_books([a, b])
         self.assertEqual(set(merged.keys()), {1, 2})
+
+
+class TestLoadSeedMetadata(unittest.TestCase):
+    def test_reads_explicit_fields(self) -> None:
+        yaml_text = (
+            "lists:\n"
+            "  - list_id: 367\n"
+            "    slug: Best_Fantasy_Books\n"
+            "    genre: fantasy\n"
+            "    short_label: Fantasy\n"
+            "    list_title: Best Fantasy Books\n"
+        )
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "seed.yaml"
+            path.write_text(yaml_text, encoding="utf-8")
+            meta = load_seed_metadata(path)
+        self.assertEqual(
+            meta[367],
+            SeedListMeta(
+                list_id=367,
+                slug="Best_Fantasy_Books",
+                genre="fantasy",
+                short_label="Fantasy",
+                list_title="Best Fantasy Books",
+            ),
+        )
+
+    def test_falls_back_when_short_label_and_list_title_omitted(self) -> None:
+        yaml_text = "lists:\n  - list_id: 8329\n    slug: Best_Romance_Books_Ever\n    genre: romance\n"
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "seed.yaml"
+            path.write_text(yaml_text, encoding="utf-8")
+            meta = load_seed_metadata(path)
+        self.assertEqual(meta[8329].short_label, "Romance")
+        self.assertEqual(meta[8329].list_title, "Best Romance Books Ever")
+
+    def test_falls_back_to_slug_when_genre_also_missing(self) -> None:
+        yaml_text = "lists:\n  - list_id: 1\n    slug: Best_Books_Ever\n"
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "seed.yaml"
+            path.write_text(yaml_text, encoding="utf-8")
+            meta = load_seed_metadata(path)
+        self.assertEqual(meta[1].short_label, "Best_Books_Ever")
+
+    def test_missing_file_returns_empty(self) -> None:
+        self.assertEqual(load_seed_metadata(Path("/nonexistent/seed.yaml")), {})
+
+
+class TestBuildGenreTagMapping(unittest.TestCase):
+    def test_produces_expected_shape(self) -> None:
+        meta = [
+            SeedListMeta(367, "Best_Fantasy_Books", "fantasy", "Fantasy", "Best Fantasy Books"),
+            SeedListMeta(8329, "Best_Romance_Books_Ever", "romance", "Romance", "Best Romance Books Ever"),
+        ]
+        mapping = build_genre_tag_mapping(meta)
+        self.assertEqual(
+            mapping,
+            {
+                "fantasy": {
+                    "short_label": "Fantasy",
+                    "list_title": "Best Fantasy Books",
+                    "slug": "Best_Fantasy_Books",
+                    "list_id": 367,
+                },
+                "romance": {
+                    "short_label": "Romance",
+                    "list_title": "Best Romance Books Ever",
+                    "slug": "Best_Romance_Books_Ever",
+                    "list_id": 8329,
+                },
+            },
+        )
+
+    def test_skips_entries_with_no_genre(self) -> None:
+        meta = [SeedListMeta(1, "Best_Books_Ever", "", "General", "Best Books Ever")]
+        self.assertEqual(build_genre_tag_mapping(meta), {})
+
+    def test_duplicate_tag_keeps_first_and_warns(self) -> None:
+        meta = [
+            SeedListMeta(367, "Best_Fantasy_Books", "fantasy", "Fantasy", "Best Fantasy Books"),
+            SeedListMeta(999, "Another_Fantasy_List", "fantasy", "Fantasy Redux", "Another Fantasy List"),
+        ]
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            mapping = build_genre_tag_mapping(meta)
+        self.assertEqual(len(mapping), 1)
+        self.assertEqual(mapping["fantasy"]["list_id"], 367, "first entry (seed-yaml order) must win")
+        self.assertIn("WARNING", stderr.getvalue())
+        self.assertIn("fantasy", stderr.getvalue())
 
 
 class TestParseBookShowNextData(unittest.TestCase):
@@ -358,7 +452,9 @@ class TestRunEndToEnd(unittest.TestCase):
             _make_ol_db(db_path, [("/works/OL1W", "The Lord of the Rings", "J. R. R. Tolkien", 500)])
 
             seed_lists_path = tmp / "seed.yaml"
-            seed_lists_path.write_text("lists:\n  - list_id: 367\n    slug: X\n    genre: fantasy\n", encoding="utf-8")
+            seed_lists_path.write_text(
+                "lists:\n  - list_id: 367\n    slug: Best_Fantasy_Books\n    genre: fantasy\n", encoding="utf-8"
+            )
 
             out_path = tmp / "matched.jsonl.gz"
             counts = run(raw_dir, db_path, out_path, seed_lists_path=seed_lists_path)
@@ -366,11 +462,51 @@ class TestRunEndToEnd(unittest.TestCase):
             self.assertEqual(counts, {"fuzzy": 1})
             with gzip.open(out_path, "rt", encoding="utf-8") as f:
                 rows = [json.loads(line) for line in f]
+
+            genre_tags_path = tmp / "genre_tags.json"
+            self.assertTrue(genre_tags_path.exists(), "genre_tags.json should be written next to matched output")
+            genre_tags = json.loads(genre_tags_path.read_text(encoding="utf-8"))
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["goodreads_book_id"], 33)
         self.assertEqual(rows[0]["work_key"], "/works/OL1W")
         self.assertEqual(rows[0]["genres"], ["fantasy"])
         self.assertIsNotNone(rows[0]["shelf_score"])
+        self.assertEqual(
+            genre_tags,
+            {"fantasy": {"short_label": "Fantasy", "list_title": "Best Fantasy Books", "slug": "Best_Fantasy_Books", "list_id": 367}},
+        )
+
+    def test_run_respects_explicit_genre_tags_out_path(self) -> None:
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            raw_dir = tmp / "raw"
+            raw_dir.mkdir()
+            record = {
+                "book_urls": ["/book/show/33.The_Lord_of_the_Rings"],
+                "titles": ["The Lord of the Rings"],
+                "authors": ["J.R.R. Tolkien"],
+                "rating_texts": ["4.55 avg rating — 745,415 ratings"],
+                "score_texts": ["score: 42,463"],
+                "vote_texts": ["430 people voted"],
+            }
+            (raw_dir / "367.jsonl").write_text(json.dumps(record) + "\n", encoding="utf-8")
+
+            db_path = tmp / "full.sqlite"
+            _make_ol_db(db_path, [("/works/OL1W", "The Lord of the Rings", "J. R. R. Tolkien", 500)])
+
+            seed_lists_path = tmp / "seed.yaml"
+            seed_lists_path.write_text("lists:\n  - list_id: 367\n    slug: X\n    genre: fantasy\n", encoding="utf-8")
+
+            out_path = tmp / "nested" / "matched.jsonl.gz"
+            genre_tags_out_path = tmp / "elsewhere" / "tags.json"
+            run(
+                raw_dir,
+                db_path,
+                out_path,
+                seed_lists_path=seed_lists_path,
+                genre_tags_out_path=genre_tags_out_path,
+            )
+            self.assertTrue(genre_tags_out_path.exists())
 
 
 if __name__ == "__main__":

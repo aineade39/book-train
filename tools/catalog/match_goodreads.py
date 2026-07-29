@@ -20,6 +20,13 @@ the raw shelf signals (avg_rating, ratings_count, list_appearances, ...) that
 `build_ios_en_from_goodreads.py` turns into a `shelf_score` inside a *scratch copy* of
 full.sqlite. This script only reads `full.sqlite` — it never writes to it.
 
+Also writes `genre_tags.json` alongside the matched output: a tag -> display-name
+mapping for every `genre` in `goodreads_seed_lists.yaml`, so each matched book's
+`genres` field (the union of seed-list tags it appeared under, e.g. `["fantasy",
+"romance"]`) can be rendered with a human-readable name. These are Listopia-list-
+derived tags, NOT Goodreads' own per-book `bookGenres` (a separate, not-yet-built
+`book_show` scrape) — see docs/BOOK_CATALOG.md.
+
 Usage:
     python tools/catalog/match_goodreads.py --ol-db /path/to/full.sqlite \\
         --out matched_goodreads.jsonl.gz
@@ -228,13 +235,64 @@ def load_goodreads_books(raw_dir: Path, seed_lists: dict[int, str] | None = None
     return dedupe_books(all_rows)
 
 
-def load_seed_list_genres(seed_lists_path: Path) -> dict[int, str]:
+@dataclass(frozen=True)
+class SeedListMeta:
+    list_id: int
+    slug: str
+    genre: str
+    short_label: str
+    list_title: str
+
+
+def load_seed_metadata(seed_lists_path: Path) -> dict[int, SeedListMeta]:
+    """Reads `goodreads_seed_lists.yaml` -> {list_id: SeedListMeta}.
+
+    `short_label`/`list_title` are optional per-entry fields (see the seed
+    yaml's header comment); when omitted, they fall back to a title-cased
+    genre tag and an underscore-to-space'd slug respectively, so existing
+    entries need no manual edits to work with `build_genre_tag_mapping`.
+    """
     if not seed_lists_path.exists():
         return {}
     import yaml
 
-    data = yaml.safe_load(seed_lists_path.read_text(encoding="utf-8"))
-    return {int(row["list_id"]): str(row.get("genre", "")) for row in data.get("lists", [])}
+    data = yaml.safe_load(seed_lists_path.read_text(encoding="utf-8")) or {}
+    out: dict[int, SeedListMeta] = {}
+    for row in data.get("lists", []):
+        list_id = int(row["list_id"])
+        slug = str(row.get("slug", ""))
+        genre = str(row.get("genre", ""))
+        short_label = str(row.get("short_label") or (genre.replace("_", " ").title() if genre else slug))
+        list_title = str(row.get("list_title") or slug.replace("_", " "))
+        out[list_id] = SeedListMeta(list_id=list_id, slug=slug, genre=genre, short_label=short_label, list_title=list_title)
+    return out
+
+
+def build_genre_tag_mapping(meta: Iterable[SeedListMeta]) -> dict[str, dict]:
+    """Tag -> display-name metadata, for `genre_tags.json`. If two seed
+    lists ever share a `genre` tag, the first one (by seed-yaml order) wins
+    and a warning is printed — today every tag in the seed yaml is unique,
+    but nothing enforces that going forward.
+    """
+    mapping: dict[str, dict] = {}
+    for m in meta:
+        if not m.genre:
+            continue
+        if m.genre in mapping:
+            print(
+                f"[match_goodreads] WARNING: genre tag '{m.genre}' is used by both list "
+                f"{mapping[m.genre]['list_id']} and list {m.list_id} — keeping the first "
+                f"(seed-yaml order); tag-to-name mapping only supports one list per tag today",
+                file=sys.stderr,
+            )
+            continue
+        mapping[m.genre] = {
+            "short_label": m.short_label,
+            "list_title": m.list_title,
+            "slug": m.slug,
+            "list_id": m.list_id,
+        }
+    return mapping
 
 
 # --- book_show (optional ISBN merge) ----------------------------------------
@@ -434,9 +492,17 @@ def run(
     *,
     book_show_dir: Path | None = None,
     seed_lists_path: Path = SEED_LISTS_PATH,
+    genre_tags_out_path: Path | None = None,
 ) -> dict[str, int]:
-    seed_genres = load_seed_list_genres(seed_lists_path)
+    seed_meta = load_seed_metadata(seed_lists_path)
+    seed_genres = {list_id: m.genre for list_id, m in seed_meta.items()}
     books = load_goodreads_books(raw_dir, seed_genres)
+
+    genre_tags_out_path = genre_tags_out_path or out_path.parent / "genre_tags.json"
+    genre_tags_out_path.parent.mkdir(parents=True, exist_ok=True)
+    genre_tags_out_path.write_text(
+        json.dumps(build_genre_tag_mapping(seed_meta.values()), indent=2, sort_keys=True), encoding="utf-8"
+    )
 
     for book_id, isbn13 in load_book_show_isbns(book_show_dir).items():
         if book_id in books:
@@ -491,14 +557,26 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--book-show-dir", type=Path, default=None, help="Optional supplementary book_show scrape output")
     parser.add_argument("--seed-lists", type=Path, default=SEED_LISTS_PATH)
     parser.add_argument("--out", type=Path, default=None, help="Default: catalog_goodreads('matched_goodreads.jsonl.gz')")
+    parser.add_argument(
+        "--genre-tags-out", type=Path, default=None, help="Default: catalog_goodreads('genre_tags.json')"
+    )
     args = parser.parse_args(argv)
 
     raw_dir = args.raw_dir or catalog_goodreads("raw")
     out_path = args.out or catalog_goodreads("matched_goodreads.jsonl.gz")
+    genre_tags_out_path = args.genre_tags_out or catalog_goodreads("genre_tags.json")
 
-    counts = run(raw_dir, args.ol_db, out_path, book_show_dir=args.book_show_dir, seed_lists_path=args.seed_lists)
+    counts = run(
+        raw_dir,
+        args.ol_db,
+        out_path,
+        book_show_dir=args.book_show_dir,
+        seed_lists_path=args.seed_lists,
+        genre_tags_out_path=genre_tags_out_path,
+    )
     print("[match_goodreads] match method counts:", json.dumps(counts, indent=2, sort_keys=True))
     print(f"[match_goodreads] wrote {out_path}")
+    print(f"[match_goodreads] wrote {genre_tags_out_path}")
     return 0
 
 

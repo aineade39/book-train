@@ -30,6 +30,7 @@ from tools.scrape_goodreads_lists import (  # noqa: E402
     SeedList,
     _count_books,
     _looks_like_challenge,
+    load_deprecated_list_ids,
     load_seed_lists,
     main,
     run_one_list,
@@ -53,6 +54,31 @@ class TestLoadSeedLists(unittest.TestCase):
             path.write_text(SEED_YAML, encoding="utf-8")
             seeds = load_seed_lists(path)
         self.assertEqual(seeds, [SeedList(1, "Alpha", "general"), SeedList(2, "Beta", "fantasy")])
+
+
+class TestLoadDeprecatedListIds(unittest.TestCase):
+    def test_missing_file_returns_empty_set(self) -> None:
+        self.assertEqual(load_deprecated_list_ids(Path("/nonexistent/overrides.yaml")), set())
+
+    def test_empty_overrides_file_returns_empty_set(self) -> None:
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "overrides.yaml"
+            path.write_text("overrides: {}\n", encoding="utf-8")
+            self.assertEqual(load_deprecated_list_ids(path), set())
+
+    def test_populated_file_returns_only_deprecated_ids(self) -> None:
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "overrides.yaml"
+            path.write_text(
+                "overrides:\n"
+                "  3:\n"
+                "    curation_status: deprecated\n"
+                "    reason: subset overlap\n"
+                "  15:\n"
+                "    curation_status: active\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(load_deprecated_list_ids(path), {3})
 
 
 class TestCheckpoint(unittest.TestCase):
@@ -314,6 +340,102 @@ class TestMainEndToEnd(unittest.TestCase):
             tmp = Path(d)
             rc = self._run_main(tmp, SEED_YAML, ["--report-only"], fake_run)
             self.assertEqual(rc, 0)
+
+    def test_skip_deprecated_without_overrides_file_is_a_noop(self) -> None:
+        """Missing overrides file + --skip-deprecated must behave exactly like
+        the flag was never passed (see tools/catalog/analyze_goodreads_lists.py)."""
+        call_count = {"n": 0}
+
+        def fake_run(cmd, cwd, capture_output, text, timeout):
+            call_count["n"] += 1
+            out_path = Path(cmd[cmd.index("--out") + 1])
+            out_path.write_text(json.dumps({"book_urls": ["/a"]}) + "\n", encoding="utf-8")
+            return subprocess.CompletedProcess(cmd, 0, stdout="ok", stderr="")
+
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            rc = self._run_main(
+                tmp,
+                SEED_YAML,
+                ["--session-max-lists", "10", "--skip-deprecated", "--overrides", str(tmp / "nonexistent.yaml")],
+                fake_run,
+            )
+            self.assertEqual(rc, 0)
+            self.assertEqual(call_count["n"], 2, "both seed lists should still be scraped")
+
+    def test_skip_deprecated_with_empty_overrides_file_is_a_noop(self) -> None:
+        call_count = {"n": 0}
+
+        def fake_run(cmd, cwd, capture_output, text, timeout):
+            call_count["n"] += 1
+            out_path = Path(cmd[cmd.index("--out") + 1])
+            out_path.write_text(json.dumps({"book_urls": ["/a"]}) + "\n", encoding="utf-8")
+            return subprocess.CompletedProcess(cmd, 0, stdout="ok", stderr="")
+
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            overrides_path = tmp / "overrides.yaml"
+            overrides_path.write_text("overrides: {}\n", encoding="utf-8")
+            rc = self._run_main(
+                tmp,
+                SEED_YAML,
+                ["--session-max-lists", "10", "--skip-deprecated", "--overrides", str(overrides_path)],
+                fake_run,
+            )
+            self.assertEqual(rc, 0)
+            self.assertEqual(call_count["n"], 2)
+
+    def test_skip_deprecated_with_populated_overrides_skips_deprecated_list(self) -> None:
+        scraped_ids: list[int] = []
+
+        def fake_run(cmd, cwd, capture_output, text, timeout):
+            list_id = int(cmd[cmd.index("--set") + 1].split("=")[1])
+            scraped_ids.append(list_id)
+            out_path = Path(cmd[cmd.index("--out") + 1])
+            out_path.write_text(json.dumps({"book_urls": ["/a"]}) + "\n", encoding="utf-8")
+            return subprocess.CompletedProcess(cmd, 0, stdout="ok", stderr="")
+
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            overrides_path = tmp / "overrides.yaml"
+            overrides_path.write_text(
+                "overrides:\n  2:\n    curation_status: deprecated\n    reason: test\n", encoding="utf-8"
+            )
+            rc = self._run_main(
+                tmp,
+                SEED_YAML,
+                ["--session-max-lists", "10", "--skip-deprecated", "--overrides", str(overrides_path)],
+                fake_run,
+            )
+            self.assertEqual(rc, 0)
+            self.assertEqual(scraped_ids, [1], "list 2 is deprecated and must be skipped")
+
+    def test_without_skip_deprecated_flag_overrides_file_is_ignored(self) -> None:
+        """The flag must be strictly opt-in: a populated overrides file must
+        not affect a run that doesn't pass --skip-deprecated."""
+        scraped_ids: list[int] = []
+
+        def fake_run(cmd, cwd, capture_output, text, timeout):
+            list_id = int(cmd[cmd.index("--set") + 1].split("=")[1])
+            scraped_ids.append(list_id)
+            out_path = Path(cmd[cmd.index("--out") + 1])
+            out_path.write_text(json.dumps({"book_urls": ["/a"]}) + "\n", encoding="utf-8")
+            return subprocess.CompletedProcess(cmd, 0, stdout="ok", stderr="")
+
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            overrides_path = tmp / "overrides.yaml"
+            overrides_path.write_text(
+                "overrides:\n  2:\n    curation_status: deprecated\n    reason: test\n", encoding="utf-8"
+            )
+            rc = self._run_main(
+                tmp,
+                SEED_YAML,
+                ["--session-max-lists", "10", "--overrides", str(overrides_path)],
+                fake_run,
+            )
+            self.assertEqual(rc, 0)
+            self.assertEqual(sorted(scraped_ids), [1, 2])
 
 
 if __name__ == "__main__":
