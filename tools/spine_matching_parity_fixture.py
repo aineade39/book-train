@@ -39,9 +39,17 @@ except ImportError:
 
 # Kept numerically in sync with the decorative-punctuation set in
 # `Sources/SpineMatching/Normalization.swift`'s `isDecorativePunctuation`.
+# U+2018/U+2019 (curly single quotes) are deliberately absent here -- as of
+# 2i they're folded to the straight apostrophe, not stripped (see
+# `_CURLY_APOSTROPHE_TO_STRAIGHT` below), same as the Swift/`ol_common.py`
+# production code.
 _DECORATIVE_PUNCTUATION = set(
-    "\"\u201c\u201d\u2018\u2019()[]{}!?;:,*#@\u2013\u2014/\\_~`^|<>=+"
+    "\"\u201c\u201d()[]{}!?;:,.*#@\u2013\u2014/\\_~`^|<>=+"
 )
+
+# 2i: fold both curly single-quote glyphs to the straight ASCII apostrophe
+# (not strip either) -- see `Normalization.swift`'s `curlyApostropheToStraight`.
+_CURLY_APOSTROPHE_TO_STRAIGHT = {"\u2018": "'", "\u2019": "'"}
 
 
 def normalize_for_search(raw: str) -> str:
@@ -61,9 +69,18 @@ def normalize_for_search(raw: str) -> str:
             last_was_space = True
             continue
         last_was_space = False
+        # 2j-5a: Unicode format characters (zero-width space, BOM, etc.) are
+        # invisible but not whitespace -- drop them like decorative
+        # punctuation.
+        if unicodedata.category(ch) == "Cf":
+            continue
         if ch in _DECORATIVE_PUNCTUATION:
             continue
-        out.append(ch)
+        if ch == "&":
+            # 2j-5c: token substitution, not a single-character fold.
+            out.append("and")
+            continue
+        out.append(_CURLY_APOSTROPHE_TO_STRAIGHT.get(ch, ch))
     result = "".join(out)
     return result[:-1] if result.endswith(" ") else result
 
