@@ -223,11 +223,15 @@ public final class BookCatalog: @unchecked Sendable {
         let query = normalizeForSearch(rawQuery)
         guard !query.isEmpty else { throw SpineCatalogError.emptyQuery }
 
+        // Runtime match-field dedup (defense-in-depth -- see
+        // `BookCatalogMatchFieldDedup.swift`), using enumerated FTS/LIKE
+        // order as a rank proxy: this path has no true per-candidate rank
+        // today, unlike `retrieveRoleAware`'s cross-pass `bestRank`.
         let trigrammableTokens = searchTokens(query).filter { $0.count >= Self.shortReadThreshold }
         guard query.count >= Self.shortReadThreshold, !trigrammableTokens.isEmpty else {
-            return try shortReadFallback(query: query, limit: limit)
+            return Self.dedupeByMatchFields(try shortReadFallback(query: query, limit: limit))
         }
-        return try trigramRetrieve(tokens: trigrammableTokens, limit: limit)
+        return Self.dedupeByMatchFields(try trigramRetrieve(tokens: trigrammableTokens, limit: limit))
     }
 
     private func trigramRetrieve(tokens: [String], limit: Int) throws -> [CatalogCandidate] {

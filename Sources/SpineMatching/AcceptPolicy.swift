@@ -54,7 +54,11 @@ public struct AcceptPolicy {
 
     /// Dedupes `scored` to one (best-scoring) entry per `workKey`, then
     /// applies the score+margin test against the best distinct-work
-    /// runner-up.
+    /// runner-up. Stays workKey-scoped -- distinct workKeys that
+    /// nonetheless share normalized match fields (an OL data-quality
+    /// pattern) are handled upstream, before scoring, by build-time dedup
+    /// (`CatalogOLBuild.buildFromIntermediate`) and its runtime defense-
+    /// in-depth counterpart (`BookCatalog.dedupeByMatchFields`), not here.
     public func decide<T: RankableCandidate>(_ scored: [ScoredCandidate<T>]) -> AcceptDecision<T> {
         decideWithMargin(scored).decision
     }

@@ -148,7 +148,213 @@ final class CLIIntegrationTests: XCTestCase {
         )
     }
 
+    // MARK: - Build-time match-field dedup (Part B) + D1-D4 build pipeline
+
+    /// Two intermediate works sharing a normalized (title, author) match
+    /// field via punctuation (not casing) but different `workKey`s -- the
+    /// OL data-quality pattern build-time dedup collapses. `works.jsonl.gz`
+    /// is already popularity-ordered by `process_ol.py`'s
+    /// `export_intermediate`, so listing the better-ranked one first
+    /// mirrors a real intermediate.
+    func testBuildFromIntermediateDedupesSharedMatchFieldKeepingBestRanked() throws {
+        guard let catalogBuildURL = Self.executableURL(named: "catalog-build") else {
+            throw XCTSkip("could not locate the built catalog-build executable next to the test bundle")
+        }
+
+        let tmpDir = FileManager.default.temporaryDirectory.appendingPathComponent("catalog-dedup-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tmpDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tmpDir) }
+
+        let intermediate = tmpDir.appendingPathComponent("intermediate")
+        try FileManager.default.createDirectory(at: intermediate, withIntermediateDirectories: true)
+        try Self.writeGzippedJSONL(
+            [
+                #"{"workKey": "/works/OLB", "title": "Dune!", "author": "Frank Herbert", "isbn13": null, "editionCount": 2, "popularityRank": 1, "languages": ["eng"]}"#,
+                #"{"workKey": "/works/OLA", "title": "Dune", "author": "Frank Herbert", "isbn13": null, "editionCount": 1, "popularityRank": 2, "languages": ["eng"]}"#,
+            ],
+            to: intermediate.appendingPathComponent("works.jsonl.gz")
+        )
+
+        let dbURL = tmpDir.appendingPathComponent("catalog.sqlite")
+        let buildResult = try Self.run(catalogBuildURL, args: [
+            "--intermediate", intermediate.path, "--output", dbURL.path, "--min-editions", "1",
+        ])
+        XCTAssertEqual(buildResult.exitCode, 0, "catalog-build OL mode stderr: \(buildResult.stderr)")
+
+        let catalog = try BookCatalog(path: dbURL.path)
+        XCTAssertEqual(try catalog.countBooks(), 1, "the two colliding works should collapse to one shipped row")
+        let rows = try catalog.dbQueue.read { db in try Row.fetchAll(db, sql: "SELECT workKey FROM books") }
+        XCTAssertEqual(
+            rows.first?["workKey"] as String?, "/works/OLB",
+            "the earlier-in-stream (lower/better popularityRank) row should win"
+        )
+    }
+
+    /// `maxWorks` must count *unique, post-dedup* shipped works, not raw
+    /// scanned rows -- a duplicate dropped by the match-field-dedup guard
+    /// must not consume a slot that a later, distinct work should get.
+    func testBuildFromIntermediateMaxWorksCountsPostDedupUniqueWorks() throws {
+        guard let catalogBuildURL = Self.executableURL(named: "catalog-build") else {
+            throw XCTSkip("could not locate the built catalog-build executable next to the test bundle")
+        }
+
+        let tmpDir = FileManager.default.temporaryDirectory.appendingPathComponent("catalog-maxworks-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tmpDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tmpDir) }
+
+        let intermediate = tmpDir.appendingPathComponent("intermediate")
+        try FileManager.default.createDirectory(at: intermediate, withIntermediateDirectories: true)
+        try Self.writeGzippedJSONL(
+            [
+                #"{"workKey": "/works/OLB", "title": "Dune!", "author": "Frank Herbert", "isbn13": null, "editionCount": 2, "popularityRank": 1, "languages": ["eng"]}"#,
+                #"{"workKey": "/works/OLA", "title": "Dune", "author": "Frank Herbert", "isbn13": null, "editionCount": 1, "popularityRank": 2, "languages": ["eng"]}"#,
+                #"{"workKey": "/works/OLC", "title": "Dune Messiah", "author": "Frank Herbert", "isbn13": null, "editionCount": 1, "popularityRank": 3, "languages": ["eng"]}"#,
+            ],
+            to: intermediate.appendingPathComponent("works.jsonl.gz")
+        )
+
+        let dbURL = tmpDir.appendingPathComponent("catalog.sqlite")
+        let buildResult = try Self.run(catalogBuildURL, args: [
+            "--intermediate", intermediate.path, "--output", dbURL.path, "--min-editions", "1", "--max-works", "2",
+        ])
+        XCTAssertEqual(buildResult.exitCode, 0, "catalog-build OL mode stderr: \(buildResult.stderr)")
+
+        let catalog = try BookCatalog(path: dbURL.path)
+        let workKeys = Set(try catalog.dbQueue.read { db in try String.fetchAll(db, sql: "SELECT workKey FROM books") })
+        XCTAssertEqual(
+            workKeys, ["/works/OLB", "/works/OLC"],
+            "--max-works 2 should ship the 2 unique post-dedup works (OLB's dup OLA doesn't count against the cap), not stop after 2 raw rows"
+        )
+    }
+
+    /// D3: `buildFromIntermediate` relaxes durability pragmas for the
+    /// bulk-insert phase, then restores them before the build is
+    /// considered complete -- verify the *restored* state is actually in
+    /// effect post-build (not just that the build completed), and that
+    /// the output DB round-trips correctly (readable, correct row count).
+    func testBuildFromIntermediateRestoresDurabilityPragmasAfterBulkLoad() throws {
+        guard let catalogBuildURL = Self.executableURL(named: "catalog-build") else {
+            throw XCTSkip("could not locate the built catalog-build executable next to the test bundle")
+        }
+
+        let tmpDir = FileManager.default.temporaryDirectory.appendingPathComponent("catalog-pragmas-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tmpDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tmpDir) }
+
+        let intermediate = tmpDir.appendingPathComponent("intermediate")
+        try FileManager.default.createDirectory(at: intermediate, withIntermediateDirectories: true)
+        try Self.writeGzippedJSONL(
+            [#"{"workKey": "/works/OLA", "title": "Dune", "author": "Frank Herbert", "isbn13": null, "editionCount": 1, "popularityRank": 1, "languages": ["eng"]}"#],
+            to: intermediate.appendingPathComponent("works.jsonl.gz")
+        )
+
+        let dbURL = tmpDir.appendingPathComponent("catalog.sqlite")
+        let buildResult = try Self.run(catalogBuildURL, args: [
+            "--intermediate", intermediate.path, "--output", dbURL.path, "--min-editions", "1",
+        ])
+        XCTAssertEqual(buildResult.exitCode, 0, "catalog-build OL mode stderr: \(buildResult.stderr)")
+
+        let catalog = try BookCatalog(path: dbURL.path)
+        XCTAssertEqual(try catalog.countBooks(), 1, "output DB should round-trip correctly (readable, correct row count)")
+
+        let (journalMode, synchronous) = try catalog.dbQueue.read { db in
+            (
+                try String.fetchOne(db, sql: "PRAGMA journal_mode") ?? "",
+                try Int.fetchOne(db, sql: "PRAGMA synchronous") ?? -1
+            )
+        }
+        XCTAssertEqual(journalMode.lowercased(), "delete", "durable journal_mode should be restored, not left at the bulk-load MEMORY setting")
+        XCTAssertEqual(synchronous, 2, "durable synchronous=FULL (2) should be restored, not left at the bulk-load OFF (0) setting")
+    }
+
+    /// D4: the deferred-index/FTS-rebuild path (`buildFromIntermediate`)
+    /// must produce a schema identical to the normal always-indexed
+    /// migrator path (CSV mode, Mode A) -- same secondary indexes, same
+    /// FTS sync triggers, same FTS query results on equivalent content.
+    func testBuildFromIntermediateSchemaMatchesNormalMigratorPath() throws {
+        guard let catalogBuildURL = Self.executableURL(named: "catalog-build") else {
+            throw XCTSkip("could not locate the built catalog-build executable next to the test bundle")
+        }
+
+        let tmpDir = FileManager.default.temporaryDirectory.appendingPathComponent("catalog-schema-parity-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tmpDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tmpDir) }
+
+        // Normal migrator path: CSV mode never touches D3/D4 at all.
+        let csvURL = tmpDir.appendingPathComponent("catalog.csv")
+        try "title,author,isbn\nProject Hail Mary,Andy Weir,9780593135204\n".write(to: csvURL, atomically: true, encoding: .utf8)
+        let normalDBURL = tmpDir.appendingPathComponent("normal.sqlite")
+        let normalResult = try Self.run(catalogBuildURL, args: [csvURL.path, "--db", normalDBURL.path])
+        XCTAssertEqual(normalResult.exitCode, 0, "csv-mode build stderr: \(normalResult.stderr)")
+
+        // Deferred-index/FTS-rebuild path: buildFromIntermediate.
+        let intermediate = tmpDir.appendingPathComponent("intermediate")
+        try FileManager.default.createDirectory(at: intermediate, withIntermediateDirectories: true)
+        try Self.writeGzippedJSONL(
+            [#"{"workKey": "/works/OL3W", "title": "Project Hail Mary", "author": "Andy Weir", "isbn13": "9780593135204", "editionCount": 1, "popularityRank": 1, "languages": ["eng"]}"#],
+            to: intermediate.appendingPathComponent("works.jsonl.gz")
+        )
+        let deferredDBURL = tmpDir.appendingPathComponent("deferred.sqlite")
+        let deferredResult = try Self.run(catalogBuildURL, args: [
+            "--intermediate", intermediate.path, "--output", deferredDBURL.path, "--min-editions", "1",
+        ])
+        XCTAssertEqual(deferredResult.exitCode, 0, "intermediate-mode build stderr: \(deferredResult.stderr)")
+
+        func schemaObjects(_ dbURL: URL, type: String) throws -> Set<String> {
+            let catalog = try BookCatalog(path: dbURL.path)
+            return Set(try catalog.dbQueue.read { db in
+                try String.fetchAll(db, sql: "SELECT name FROM sqlite_master WHERE type = ? AND tbl_name = 'books'", arguments: [type])
+            })
+        }
+
+        XCTAssertEqual(
+            try schemaObjects(normalDBURL, type: "index"), try schemaObjects(deferredDBURL, type: "index"),
+            "the deferred-index path must produce the same secondary indexes as the normal migrator path"
+        )
+        XCTAssertEqual(
+            try schemaObjects(normalDBURL, type: "trigger"), try schemaObjects(deferredDBURL, type: "trigger"),
+            "the deferred-index path must recreate the same FTS sync triggers as the normal migrator path"
+        )
+
+        // Same FTS query results on equivalent content.
+        func ftsTitles(_ dbURL: URL) throws -> [String] {
+            let catalog = try BookCatalog(path: dbURL.path)
+            return try catalog.dbQueue.read { db in
+                try String.fetchAll(
+                    db,
+                    sql: """
+                        SELECT books.title FROM books_fts
+                        JOIN books ON books.id = books_fts.rowid
+                        WHERE books_fts MATCH '"andy"' ORDER BY rank
+                        """
+                )
+            }
+        }
+        XCTAssertEqual(try ftsTitles(normalDBURL), ["Project Hail Mary"])
+        XCTAssertEqual(try ftsTitles(deferredDBURL), ["Project Hail Mary"], "the FTS rebuild after deferred bulk-insert must be queryable identically to the normal path")
+    }
+
     // MARK: - Helpers (mirrors Tests/SpineCoreTests/ParityIntegrationTests.swift)
+
+    /// Gzip-compresses `lines` (newline-joined) to `url` via `/usr/bin/gzip`
+    /// -- `CatalogOLBuild.streamGzippedJSONL` shells out to `gunzip -c`, so
+    /// intermediate fixtures built inline for a test need to be real gzip
+    /// data, not just a `.gz`-named plain-text file.
+    private static func writeGzippedJSONL(_ lines: [String], to url: URL) throws {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/gzip")
+        process.arguments = ["-c"]
+        let inPipe = Pipe()
+        let outPipe = Pipe()
+        process.standardInput = inPipe
+        process.standardOutput = outPipe
+        try process.run()
+        inPipe.fileHandleForWriting.write(Data((lines.joined(separator: "\n") + "\n").utf8))
+        try inPipe.fileHandleForWriting.close()
+        let outData = outPipe.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        try outData.write(to: url)
+    }
 
     private static func executableURL(named name: String) -> URL? {
         let candidate = Bundle(for: CLIIntegrationTests.self).bundleURL

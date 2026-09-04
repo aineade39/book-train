@@ -61,7 +61,7 @@ final class SpineIdentificationEngineTests: XCTestCase {
         XCTAssertTrue(result.capturePassed, "the short circuit reports capture as passed -- the gate was never consulted")
         XCTAssertEqual(result.isbnBarcodes, [duneISBN13])
         XCTAssertEqual(result.spines.count, 1)
-        guard case .autoAccepted(let title, let author, _) = result.spines[0].decision else {
+        guard case .autoAccepted(let title, let author, _, _) = result.spines[0].decision else {
             return XCTFail("expected .autoAccepted, got \(result.spines[0].decision)")
         }
         XCTAssertEqual(title, "Dune")

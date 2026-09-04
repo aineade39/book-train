@@ -49,15 +49,21 @@ extension BookCatalog {
             merge(try columnRetrieve(tokens: queries.generalTokens.map(\.token), columns: nil, limit: 30))
         }
 
+        // Runtime match-field dedup (defense-in-depth -- see
+        // `BookCatalogMatchFieldDedup.swift`): distinct workKeys can still
+        // share normalized title/author on catalogs that didn't go
+        // through the OL ETL's build-time dedup. Applied to every return
+        // path below, before `shortlistCap`/fixed limits, so a duplicate
+        // never consumes a slot a distinct work should have gotten.
         if !ranked.isEmpty {
-            return ranked.values.sorted { $0.bestRank < $1.bestRank }.prefix(shortlistCap).map(\.candidate)
+            return Self.dedupeByMatchFields([], rankedBy: Array(ranked.values), cap: shortlistCap)
         }
 
         // Empty-shortlist fallback #1: wider (top-12) unscoped pool, no
         // per-pass LIMIT-80/50/30 narrowing.
         if !queries.fallbackTokens.isEmpty {
             let fallback = try columnRetrieve(tokens: queries.fallbackTokens.map(\.token), columns: nil, limit: 100)
-            if !fallback.isEmpty { return fallback }
+            if !fallback.isEmpty { return Self.dedupeByMatchFields(fallback) }
         }
 
         // Empty-shortlist fallback #2: short-read LIKE, only meaningful
@@ -65,7 +71,7 @@ extension BookCatalog {
         // trigram-tokenizable in the first place.
         if let shortest = queries.fallbackTokens.map(\.token).min(by: { $0.count < $1.count }),
            shortest.count < Self.shortReadThreshold {
-            return try shortReadFallback(query: shortest, limit: 50)
+            return Self.dedupeByMatchFields(try shortReadFallback(query: shortest, limit: 50))
         }
 
         return []

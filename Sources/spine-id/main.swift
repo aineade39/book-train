@@ -151,6 +151,7 @@ struct SpineResultJSON: Codable {
     let decision: String
     let matchedTitle: String?
     let matchedAuthor: String?
+    let matchedWorkKey: String?
     let score: Double?
     let margin: Double?
     let source: String
@@ -176,16 +177,16 @@ func toJSON(_ spine: SpinePipelineSpine) -> SpineResultJSON {
             angleDeg: base.angleDeg, detectionConfidence: base.detectionConfidence,
             assembledText: base.assembledText, ocrQualityScore: base.ocrQualityScore,
             passedOCRQualityGate: false, decision: "no-match", matchedTitle: nil, matchedAuthor: nil,
-            score: nil, margin: nil, source: base.source, topCandidates: []
+            matchedWorkKey: nil, score: nil, margin: nil, source: base.source, topCandidates: []
         )
-    case .autoAccepted(let title, let author, let score):
+    case .autoAccepted(let title, let author, let workKey, let score):
         log("  [\(spine.id.uuidString.prefix(8))] auto-accept: \"\(spine.assembledText)\" -> \(title)")
         return SpineResultJSON(
             id: base.id, cx: base.cx, cy: base.cy, w: base.w, h: base.h,
             angleDeg: base.angleDeg, detectionConfidence: base.detectionConfidence,
             assembledText: base.assembledText, ocrQualityScore: base.ocrQualityScore,
             passedOCRQualityGate: true, decision: "auto-accept", matchedTitle: title, matchedAuthor: author,
-            score: score, margin: base.margin, source: base.source, topCandidates: [title]
+            matchedWorkKey: workKey, score: score, margin: base.margin, source: base.source, topCandidates: [title]
         )
     case .needsConfirmation(let candidates):
         log("  [\(spine.id.uuidString.prefix(8))] ambiguous: \"\(spine.assembledText)\" -> \(candidates.map(\.candidate.title))")
@@ -194,7 +195,7 @@ func toJSON(_ spine: SpinePipelineSpine) -> SpineResultJSON {
             angleDeg: base.angleDeg, detectionConfidence: base.detectionConfidence,
             assembledText: base.assembledText, ocrQualityScore: base.ocrQualityScore,
             passedOCRQualityGate: true, decision: "ambiguous", matchedTitle: nil, matchedAuthor: nil,
-            score: candidates.first?.score, margin: base.margin, source: base.source,
+            matchedWorkKey: nil, score: candidates.first?.score, margin: base.margin, source: base.source,
             topCandidates: candidates.map(\.candidate.title)
         )
     case .noMatch:
@@ -203,7 +204,7 @@ func toJSON(_ spine: SpinePipelineSpine) -> SpineResultJSON {
             angleDeg: base.angleDeg, detectionConfidence: base.detectionConfidence,
             assembledText: base.assembledText, ocrQualityScore: base.ocrQualityScore,
             passedOCRQualityGate: true, decision: "no-match", matchedTitle: nil, matchedAuthor: nil,
-            score: nil, margin: base.margin, source: base.source, topCandidates: []
+            matchedWorkKey: nil, score: nil, margin: base.margin, source: base.source, topCandidates: []
         )
     }
 }

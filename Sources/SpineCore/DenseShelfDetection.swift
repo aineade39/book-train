@@ -67,6 +67,53 @@ public struct DenseShelfDetectionResult {
     /// (i.e. only found by a crop re-inference) — the spines single-shot
     /// detection would otherwise have missed.
     public let newDetectionCount: Int
+    /// Scene-space crop quads (TL, TR, BR, BL) from `planCrops`. Empty when
+    /// the planner did not run. Present even if hard rules failed and the
+    /// jigsaw re-inference pass was skipped.
+    public let cropQuads: [[CGPoint]]
+
+    public init(
+        detections: [OBBDetection],
+        usedJigsaw: Bool,
+        firstPassCount: Int,
+        plannedCropCount: Int,
+        newDetectionCount: Int,
+        cropQuads: [[CGPoint]] = []
+    ) {
+        self.detections = detections
+        self.usedJigsaw = usedJigsaw
+        self.firstPassCount = firstPassCount
+        self.plannedCropCount = plannedCropCount
+        self.newDetectionCount = newDetectionCount
+        self.cropQuads = cropQuads
+    }
+}
+
+/// Axis-aligned bounds of a crop-plan quad, for progress reporting.
+private func boundingRect(of quad: [CGPoint]) -> CGRect {
+    guard let firstPoint = quad.first else { return .zero }
+    var minX = firstPoint.x, maxX = firstPoint.x
+    var minY = firstPoint.y, maxY = firstPoint.y
+    for p in quad.dropFirst() {
+        minX = min(minX, p.x); maxX = max(maxX, p.x)
+        minY = min(minY, p.y); maxY = max(maxY, p.y)
+    }
+    return CGRect(x: minX, y: minY, width: maxX - minX, height: maxY - minY)
+}
+
+/// Incremental reporting from `denseShelfDetect` so a caller's UI can show
+/// detect work as it happens (FUNC §5.2 "Finding books"). Additive: the
+/// closure defaults to nil, so CLI callers are unchanged.
+public enum DenseShelfDetectProgress {
+    /// The full-frame pass finished: its NMS'd detections, plus the
+    /// bounding rects (scene pixels) of any planned jigsaw areas about to
+    /// be re-inferred — empty when the jigsaw pass is skipped, meaning
+    /// detect is done.
+    case firstPass(detections: [OBBDetection], plannedAreaRects: [CGRect])
+    /// One planned jigsaw area finished re-inference (index into
+    /// `plannedAreaRects`). Fires even when the area's warp/predict
+    /// failed, so completed counts always reach the total.
+    case areaCompleted(index: Int)
 }
 
 /// Single-shot detect -> (if dense) plan/verify/re-infer/merge. See
@@ -76,7 +123,8 @@ public func denseShelfDetect(
     image: CGImage,
     predict: (CGImage) throws -> InferenceResult,
     options: DetectionOptions,
-    denseOptions: DenseShelfDetectionOptions = .default
+    denseOptions: DenseShelfDetectionOptions = .default,
+    progress: ((DenseShelfDetectProgress) -> Void)? = nil
 ) throws -> DenseShelfDetectionResult {
     let imgW = image.width
     let imgH = image.height
@@ -88,7 +136,11 @@ public func denseShelfDetect(
     first = first.filter { $0.cx >= 0 && $0.cx <= Double(imgW) && $0.cy >= 0 && $0.cy <= Double(imgH) }
 
     guard first.count >= denseOptions.denseThreshold, let raster = SceneRaster(cgImage: image) else {
-        return DenseShelfDetectionResult(detections: first, usedJigsaw: false, firstPassCount: first.count, plannedCropCount: 0, newDetectionCount: 0)
+        progress?(.firstPass(detections: first, plannedAreaRects: []))
+        return DenseShelfDetectionResult(
+            detections: first, usedJigsaw: false, firstPassCount: first.count,
+            plannedCropCount: 0, newDetectionCount: 0, cropQuads: []
+        )
     }
 
     let plans = planCrops(
@@ -98,11 +150,18 @@ public func denseShelfDetect(
     )
     let ruleResults = verifyPlan(dets: first, plans: plans, imgW: imgW, imgH: imgH, angleTolDeg: denseOptions.angleTolDeg)
     guard hardRulesOK(ruleResults) else {
-        return DenseShelfDetectionResult(detections: first, usedJigsaw: false, firstPassCount: first.count, plannedCropCount: plans.count, newDetectionCount: 0)
+        progress?(.firstPass(detections: first, plannedAreaRects: []))
+        return DenseShelfDetectionResult(
+            detections: first, usedJigsaw: false, firstPassCount: first.count,
+            plannedCropCount: plans.count, newDetectionCount: 0, cropQuads: plans.map(\.quad)
+        )
     }
 
+    progress?(.firstPass(detections: first, plannedAreaRects: plans.map { boundingRect(of: $0.quad) }))
+
     var cropDets: [OBBDetection] = []
-    for plan in plans {
+    for (planIndex, plan) in plans.enumerated() {
+        defer { progress?(.areaCompleted(index: planIndex)) }
         guard let warped = warpQuad(raster, quad: plan.quad, maxSide: denseOptions.imgsz, padValue: denseOptions.padValue),
               let padded = padNoUpsize(warped.image, canvas: denseOptions.imgsz, padValue: denseOptions.padValue),
               let raw = try? predict(padded.image) else { continue }
@@ -119,6 +178,7 @@ public func denseShelfDetect(
     let newCount = merged.filter { !firstIds.contains($0.id) }.count
     return DenseShelfDetectionResult(
         detections: merged, usedJigsaw: true, firstPassCount: first.count,
-        plannedCropCount: plans.count, newDetectionCount: newCount
+        plannedCropCount: plans.count, newDetectionCount: newCount,
+        cropQuads: plans.map(\.quad)
     )
 }

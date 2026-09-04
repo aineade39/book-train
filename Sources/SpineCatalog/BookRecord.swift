@@ -76,6 +76,21 @@ public struct CatalogCandidate: RankableCandidate, Equatable {
     /// publisher strings" shape a spine OCR blob is compared against.
     public var searchableText: String { "\(title) \(author)" }
 
+    /// `titleNormalized + "|" + authorNormalized`, catalog-internal.
+    /// Sourced from `BookRecord`'s *stored* normalized columns rather than
+    /// re-normalizing `title`/`author` here -- rows sharing a
+    /// `titleNormalized`/`authorNormalized` pair can still have distinct
+    /// display strings (e.g. punctuation differences), so re-normalizing
+    /// display text could compute a different grouping than the one the
+    /// catalog actually stored. Used only for `dedupeByMatchFields`
+    /// (defense-in-depth runtime dedup) -- distinct `workKey`s that
+    /// nonetheless share normalized match fields (an OL data-quality
+    /// pattern that build-time dedup in `CatalogOLBuild` already collapses
+    /// for OL-ETL-built catalogs; this is the runtime safety net for
+    /// catalogs that don't go through that ETL). Not part of `Equatable`
+    /// identity beyond what falls out of the synthesized member-wise `==`.
+    let matchFieldKey: String
+
     init(_ record: BookRecord) {
         id = record.id ?? 0
         workKey = record.workKey
@@ -83,5 +98,6 @@ public struct CatalogCandidate: RankableCandidate, Equatable {
         author = record.author
         isbn = record.isbn
         popularityRank = record.popularityRank
+        matchFieldKey = record.titleNormalized + "|" + record.authorNormalized
     }
 }

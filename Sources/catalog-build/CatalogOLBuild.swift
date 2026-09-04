@@ -58,6 +58,22 @@ enum CatalogOLBuild {
             try FileManager.default.removeItem(at: output)
         }
         let catalog = try BookCatalog(path: output.path)
+        try relaxDurabilityForBulkLoad(catalog)
+
+        // D4: defer books_fts sync + the 4 secondary indexes on `books`
+        // until after bulk insert -- two compounding well-known SQLite/
+        // FTS5 bulk-load anti-patterns at this row count (~35M rows):
+        // incremental B-tree maintenance on every insert, and per-row
+        // trigram tokenization via `books_fts`'s AFTER INSERT trigger.
+        // Captures the *actual* CREATE INDEX/CREATE TRIGGER SQL the normal
+        // migrator just produced (rather than a hardcoded copy) so this
+        // can't silently drift from `BookCatalog`'s migrator if it changes
+        // -- `rebuildDeferredSchema` replays exactly what was captured.
+        // Only used for this from-scratch OL build path; `buildFromSubset`
+        // keeps the normal always-indexed behavior (already fine at that
+        // smaller scale).
+        let deferredSchema = try captureDeferredSchema(catalog)
+        try dropDeferredSchema(catalog, deferredSchema)
 
         // Pass 1: stream works.jsonl.gz -> filter -> batch-insert. Never
         // holds more than `streamBatchSize` decoded works at once. Also
@@ -68,6 +84,16 @@ enum CatalogOLBuild {
         // `CustomWordsBuilder.Accumulator`, keyed by word, not by author).
         let langSet = Set(filters.languages.map { $0.lowercased() })
         var shippedWorkKeys: Set<String> = []
+        // Build-time match-field dedup ("Catalog match quality" plan, Part
+        // B): works.jsonl.gz is already popularity-ordered (edition_count
+        // DESC, and popularityRank is assigned in that exact order by
+        // process_ol.py's export_intermediate), so the *first* occurrence
+        // of a given normalized (title, author) pair in the stream is
+        // always the best-ranked candidate -- no need to buffer full row
+        // data per group, just the key. Same OOM-safety shape as
+        // `shippedWorkKeys` above: bounded by unique-key count, not total
+        // row count.
+        var seenMatchFieldKeys: Set<String> = []
         var customWordsAcc = CustomWordsBuilder.Accumulator()
         var batch: [BookCatalog.WorkInsert] = []
         batch.reserveCapacity(streamBatchSize)
@@ -96,6 +122,17 @@ enum CatalogOLBuild {
             // same N works the old array-then-prefix approach kept.
             let shippedSoFar = inserted + batch.count
             if let max = filters.maxWorks, shippedSoFar >= max { return }
+
+            // Distinct workKeys can still share normalized match fields
+            // (OL data-quality duplicates, ~9.2% of full.sqlite) --
+            // `AcceptPolicy`'s workKey-scoped dedup doesn't catch these,
+            // so collapse them here, before the maxWorks cap counts them
+            // as "shipped". Keeping only the first (best-ranked)
+            // occurrence per key means `buildFromSubset`'s downstream
+            // `popularityRank.asc` + `prefix(max)` inherits deduped rows
+            // automatically -- no changes needed there.
+            let matchFieldKey = normalizeForSearch(work.title) + "|" + normalizeForSearch(work.author)
+            guard seenMatchFieldKeys.insert(matchFieldKey).inserted else { return }
 
             let row = BookCatalog.WorkInsert(
                 workKey: work.workKey, title: work.title, author: work.author, isbn: work.isbn13,
@@ -139,6 +176,13 @@ enum CatalogOLBuild {
         } else {
             log("catalog-build: no isbns.jsonl.gz found at \(isbnsFile.path); book_isbns will be empty")
         }
+
+        // D4 (continued): rebuild `books_fts`'s shadow tables in one bulk
+        // pass (`INSERT INTO books_fts(books_fts) VALUES('rebuild')` --
+        // FTS5's own documented bulk-load idiom) and recreate the 4
+        // secondary indexes, using the exact CREATE statements captured
+        // before the drop above.
+        try rebuildDeferredSchema(catalog, deferredSchema)
 
         try finalizeCatalog(
             catalog, worksInserted: inserted, isbnsInserted: isbnCount,
@@ -203,6 +247,7 @@ enum CatalogOLBuild {
             try FileManager.default.removeItem(at: output)
         }
         let catalog = try BookCatalog(path: output.path)
+        try relaxDurabilityForBulkLoad(catalog)
         let inserted = try catalog.bulkInsert(rows)
 
         try catalog.insertISBNs(isbns)
@@ -220,6 +265,80 @@ enum CatalogOLBuild {
         )
     }
 
+    /// D3: relaxes durability pragmas for a from-scratch bulk-insert build
+    /// -- safe because a build in progress is fully discardable on
+    /// failure/crash (the caller already deletes any stale `output` file
+    /// first, and nothing reads this DB until `finalizeCatalog` restores
+    /// durable settings). Avoids a full fsync per batch-commit
+    /// (`buildFromIntermediate`'s ~7,000 batches for `full`'s ~35M rows).
+    private static func relaxDurabilityForBulkLoad(_ catalog: BookCatalog) throws {
+        try catalog.dbQueue.writeWithoutTransaction { db in
+            try db.execute(sql: "PRAGMA synchronous = OFF")
+            try db.execute(sql: "PRAGMA journal_mode = MEMORY")
+        }
+    }
+
+    /// D4: the CREATE INDEX/CREATE TRIGGER statements GRDB's migrator just
+    /// produced for `books`/`books_fts`, captured live from `sqlite_master`
+    /// (not hardcoded) so `dropDeferredSchema`/`rebuildDeferredSchema` stay
+    /// correct even if `BookCatalog`'s migrator changes later.
+    private struct DeferredSchema {
+        var indexNames: [String]
+        var indexCreateSQL: [String]
+        var triggerNames: [String]
+        var triggerCreateSQL: [String]
+    }
+
+    private static func captureDeferredSchema(_ catalog: BookCatalog) throws -> DeferredSchema {
+        try catalog.dbQueue.read { db in
+            let indexRows = try Row.fetchAll(
+                db,
+                sql: """
+                    SELECT name, sql FROM sqlite_master
+                    WHERE type = 'index' AND tbl_name = 'books' AND sql IS NOT NULL
+                    """
+            )
+            let triggerRows = try Row.fetchAll(
+                db,
+                sql: "SELECT name, sql FROM sqlite_master WHERE type = 'trigger' AND tbl_name = 'books'"
+            )
+            return DeferredSchema(
+                indexNames: indexRows.map { $0["name"] },
+                indexCreateSQL: indexRows.map { $0["sql"] },
+                triggerNames: triggerRows.map { $0["name"] },
+                triggerCreateSQL: triggerRows.map { $0["sql"] }
+            )
+        }
+    }
+
+    private static func dropDeferredSchema(_ catalog: BookCatalog, _ schema: DeferredSchema) throws {
+        try catalog.dbQueue.writeWithoutTransaction { db in
+            for name in schema.triggerNames {
+                try db.execute(sql: "DROP TRIGGER \"\(name)\"")
+            }
+            for name in schema.indexNames {
+                try db.execute(sql: "DROP INDEX \"\(name)\"")
+            }
+        }
+    }
+
+    /// Replays the captured CREATE statements verbatim, then runs FTS5's
+    /// documented bulk-load idiom (`INSERT INTO books_fts(books_fts)
+    /// VALUES('rebuild')`) to repopulate the trigram shadow tables in one
+    /// pass by scanning the (now fully-populated) `books` content table
+    /// directly -- independent of whether the sync triggers exist yet.
+    private static func rebuildDeferredSchema(_ catalog: BookCatalog, _ schema: DeferredSchema) throws {
+        try catalog.dbQueue.writeWithoutTransaction { db in
+            for sql in schema.indexCreateSQL {
+                try db.execute(sql: sql)
+            }
+            try db.execute(sql: "INSERT INTO books_fts(books_fts) VALUES('rebuild')")
+            for sql in schema.triggerCreateSQL {
+                try db.execute(sql: sql)
+            }
+        }
+    }
+
     /// Shared tail end of every build path: install the customWords
     /// lexicon, optionally `VACUUM` (see `vacuumRowThreshold`), and log the
     /// final row/byte counts.
@@ -234,6 +353,10 @@ enum CatalogOLBuild {
         try catalog.insertCustomWords(customWords)
 
         try catalog.dbQueue.writeWithoutTransaction { db in
+            // D3: restore durable settings -- relaxed by
+            // `relaxDurabilityForBulkLoad` at the start of the bulk-insert
+            // phase; the build is considered complete once this runs.
+            try db.execute(sql: "PRAGMA synchronous = FULL")
             try db.execute(sql: "PRAGMA journal_mode=DELETE")
         }
         if worksInserted <= vacuumRowThreshold {

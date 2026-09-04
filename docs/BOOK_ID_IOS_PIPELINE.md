@@ -105,7 +105,12 @@ Foundation Models are unavailable.
 ### Non-functional requirements
 
 - **Privacy:** Default on-device; no image or OCR text leaves device in core
-  flow.
+  flow. Both stores treat on-device-only processing as not "collected", so the
+  core flow needs no photo-collection disclosure — but derived data sent off
+  device is judged separately, and third-party SDK telemetry counts regardless
+  of where inference runs. Audit every SDK and sync path before making the
+  claim in store metadata or marketing: [coldframe — on-device vision and
+  privacy tradeoffs](https://github.com/aineade39/coldframe/blob/main/wiki/privacy-security/on-device-vision-privacy-tradeoffs.md).
 - **Device coverage:** Full pipeline on all target iPhones; FM escalation
   gracefully degrades on unsupported hardware / regions.
 - **Performance budget:** Vision OCR is ms–low-seconds *per crop*, but a dense
@@ -241,6 +246,17 @@ let extraction = try await session.respond(
 - **Editions:** title+author maps to many editions. Retrieve/rank at the *work*
   level (or dedupe editions before applying the margin test) so the runner-up in
   the accept policy isn't just another printing of the same book.
+- **Co-authors:** a work's `author`/`authorNormalized` cover *every* OL-credited
+  author (OL order, first = primary), not just the first — see
+  [`BOOK_CATALOG.md`](BOOK_CATALOG.md)'s co-author note.
+- **Cross-work match-field duplicates:** distinct `workKey`s can still end up
+  with identical normalized `(title, author)` (an OL data-quality pattern, ~9%
+  of a pre-dedup `full.sqlite`) — `AcceptPolicy`'s work-level dedup above
+  doesn't catch this since each has its own `workKey`. The catalog build
+  collapses these at build time (see `BOOK_CATALOG.md`); `BookCatalog.
+  dedupeByMatchFields` is a runtime defense-in-depth for catalogs that don't go
+  through that ETL (CSV imports, hand-built/test catalogs, a stale on-device
+  catalog pre-update).
 
 ### Matching design
 
@@ -252,6 +268,12 @@ let extraction = try await session.respond(
 - Accept policy: `score ≥ T` **and** `score - runnerUp ≥ Δ`; otherwise surface
   UI. The margin test only works if the scorer doesn't tie at ceiling — hence the
   scorer choice above.
+- Cross-work match-field duplicates (see §Data model) are collapsed *before*
+  scoring — in `retrieveRoleAware`/`retrieveCandidates`, not in `AcceptPolicy`
+  — so a stray duplicate can't tie with itself under a different `workKey` and
+  manufacture a false margin failure. `AcceptPolicy`'s own dedup stays
+  `workKey`-scoped by design; it's a different, unrelated case (same work,
+  multiple editions).
 
 ### Risks & mitigations
 

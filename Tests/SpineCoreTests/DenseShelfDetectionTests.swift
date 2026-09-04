@@ -41,6 +41,7 @@ final class DenseShelfDetectionTests: XCTestCase {
         XCTAssertEqual(result.firstPassCount, 2)
         XCTAssertEqual(result.detections.count, 2)
         XCTAssertEqual(result.newDetectionCount, 0)
+        XCTAssertTrue(result.cropQuads.isEmpty)
     }
 
     // MARK: - Out-of-frame first-pass detections are dropped (matches CLI)
@@ -119,6 +120,8 @@ final class DenseShelfDetectionTests: XCTestCase {
         XCTAssertTrue(result.usedJigsaw)
         XCTAssertEqual(result.firstPassCount, 4)
         XCTAssertEqual(result.plannedCropCount, plans.count)
+        XCTAssertEqual(result.cropQuads.count, plans.count)
+        XCTAssertEqual(result.cropQuads.first?.count, 4)
         XCTAssertEqual(predictCallCount, 1 + plans.count)
         XCTAssertEqual(result.newDetectionCount, 1, "the fabricated crop-only detection should survive merge as a distinct spine")
         XCTAssertEqual(result.detections.count, 5)

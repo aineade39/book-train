@@ -192,4 +192,77 @@ final class BookCatalogISBNAndRoleRetrievalTests: XCTestCase {
         }
         XCTAssertEqual(winner.candidate.title, "Project Hail Mary")
     }
+
+    // MARK: - Match-field dedup, defense-in-depth ("Catalog match quality" plan §Part C)
+
+    /// Distinct `workKey`s sharing normalized match fields (differing
+    /// punctuation, not just casing -- `normalizeForSearch` already covers
+    /// case) is the OL data-quality pattern build-time dedup collapses at
+    /// catalog-build time; this is the runtime safety net for catalogs
+    /// that don't go through that ETL (e.g. this in-memory test catalog).
+    func testRetrieveRoleAwareDedupesSameMatchFields() throws {
+        let catalog = try makeCatalog()
+        try catalog.insert(title: "Dune", author: "Frank Herbert", workKey: "/works/OLA")
+        try catalog.insert(title: "Dune!", author: "Frank Herbert", workKey: "/works/OLB")
+
+        let results = try catalog.retrieveRoleAware(roleQueries(title: "Dune", author: "Frank Herbert"))
+        XCTAssertEqual(results.count, 1, "distinct workKeys sharing normalized match fields should collapse to one candidate")
+    }
+
+    /// Regression guard: distinct titles sharing an author must not be
+    /// collapsed just because they share one normalized field.
+    func testRetrieveRoleAwareKeepsDistinctMatchFields() throws {
+        let catalog = try makeCatalog()
+        try catalog.insert(title: "Dune", author: "Frank Herbert")
+        try catalog.insert(title: "Dune Messiah", author: "Frank Herbert")
+
+        let results = try catalog.retrieveRoleAware(roleQueries(title: "", author: "Frank Herbert"))
+        XCTAssertEqual(
+            Set(results.map(\.title)), ["Dune", "Dune Messiah"],
+            "distinct titles must not be collapsed by match-field dedup"
+        )
+    }
+
+    func testMatchFieldDedupPrefersLowerPopularityRank() throws {
+        let catalog = try makeCatalog()
+        _ = try catalog.bulkInsert([
+            BookCatalog.WorkInsert(workKey: "/works/OLA", title: "Dune", author: "Frank Herbert", popularityRank: 500),
+            BookCatalog.WorkInsert(workKey: "/works/OLB", title: "Dune!", author: "Frank Herbert", popularityRank: 5),
+        ])
+
+        let results = try catalog.retrieveRoleAware(roleQueries(title: "Dune", author: "Frank Herbert"))
+        XCTAssertEqual(results.count, 1)
+        XCTAssertEqual(results.first?.workKey, "/works/OLB", "lower (more popular) popularityRank should win the dedup group")
+    }
+
+    /// Without upstream match-field dedup, two duplicate-`workKey` rows
+    /// with near-identical scores would tie in `AcceptPolicy.bestPerWork`
+    /// (which is workKey-scoped, so it sees them as two distinct works)
+    /// and block the margin test -- `.ambiguous` instead of `.autoAccept`,
+    /// even though there's really only one candidate work here plus one
+    /// clearly weaker unrelated runner-up. Dedup applied in
+    /// `retrieveRoleAware`, *before* scoring, fixes this.
+    func testMatchRoleAwareAutoAcceptsWhenMatchFieldDupWouldHaveBlockedMargin() throws {
+        let catalog = try makeCatalog()
+        _ = try catalog.bulkInsert([
+            BookCatalog.WorkInsert(workKey: "/works/OLA", title: "Dune", author: "Frank Herbert", popularityRank: 1),
+            BookCatalog.WorkInsert(workKey: "/works/OLB", title: "Dune!", author: "Frank Herbert", popularityRank: 2),
+        ])
+        // Shares the author (so the author-scoped pass retrieves it into
+        // the shortlist at all -- an unrelated title+author wouldn't be
+        // retrieved by this query, and so couldn't have blocked the
+        // margin test either) but a completely different title, so it
+        // scores far behind the "Dune" duplicate group once reranked --
+        // same shape as `testMatchRoleAwareAutoAcceptsClearTitleAndAuthorMatch`'s
+        // "Artemis" runner-up.
+        try catalog.insert(title: "The Godmakers", author: "Frank Herbert", workKey: "/works/OLC")
+
+        let outcome = try catalog.matchRoleAware(roleQueries(title: "Dune", author: "Frank Herbert"))
+        guard case .autoAccept(let winner) = outcome.decision else {
+            return XCTFail("expected .autoAccept, got \(outcome.decision)")
+        }
+        XCTAssertEqual(winner.candidate.workKey, "/works/OLA")
+        XCTAssertNotNil(outcome.margin)
+        XCTAssertGreaterThanOrEqual(outcome.margin ?? 0, AcceptPolicy().marginThreshold)
+    }
 }

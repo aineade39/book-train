@@ -29,6 +29,59 @@ public enum SpinePipelineSource: String, Equatable {
     case barcode
 }
 
+/// Incremental UI progress from `run(progress:)`. OCR and catalog match
+/// are separate phases so a dense shelf against `full.sqlite` does not
+/// look hung at "Reading N of N" while matching is still running.
+public struct SpinePipelineProgress: Sendable {
+    public enum Phase: Sendable {
+        /// Detect work (full-frame pass + optional jigsaw areas).
+        /// `completed`/`total` count areas: the full frame is area one,
+        /// and the total grows once the jigsaw plan is known.
+        case detecting
+        case reading
+        case matching
+    }
+    public let phase: Phase
+    public let completed: Int
+    public let total: Int
+    /// Most recently completed OCR blob; empty during matching or when
+    /// a spine produced no text.
+    public let latestText: String
+    /// Detected spine OBBs: the first-pass set on the `.detecting` report
+    /// that carries `areaRects`, then the final merged set once on the
+    /// first `.reading` report (completed == 0) so a UI can outline the
+    /// found spines on the photo while OCR/match still run; nil on every
+    /// other report.
+    public let detections: [OBBDetection]?
+    /// The detection whose OCR (`.reading`) or catalog match (`.matching`)
+    /// just finished -- lets a UI light up that spine's outline as the
+    /// pipeline works through the shelf.
+    public let completedDetectionID: UUID?
+    /// Bounding rects (scene pixels) of the planned jigsaw re-inference
+    /// areas, sent once on the `.detecting` report after the full-frame
+    /// pass (empty when the jigsaw is skipped). A UI can dim these as
+    /// "not yet processed" regions; nil on every other report.
+    public let areaRects: [CGRect]?
+    /// Index into `areaRects` of the jigsaw area that just finished, on
+    /// later `.detecting` reports -- lets a UI lift that region's dim.
+    public let completedAreaIndex: Int?
+
+    public init(
+        phase: Phase, completed: Int, total: Int, latestText: String = "",
+        detections: [OBBDetection]? = nil, completedDetectionID: UUID? = nil,
+        areaRects: [CGRect]? = nil, completedAreaIndex: Int? = nil
+    ) {
+        self.phase = phase
+        self.completed = completed
+        self.total = total
+        self.latestText = latestText
+        self.detections = detections
+        self.completedDetectionID = completedDetectionID
+        self.areaRects = areaRects
+        self.completedAreaIndex = completedAreaIndex
+    }
+}
+
 /// Named phases `run()` times, in execution order. Stable `rawValue`s so
 /// callers (the book-id-ios telemetry writer, or any future consumer) have
 /// a fixed key set rather than ad hoc strings -- see the Book ID Telemetry
@@ -83,7 +136,7 @@ public struct SpinePipelineCandidate: Equatable {
 /// `ConfirmSheet`. That's UI-session state, not something this engine (or
 /// `spine-id`) ever produces.
 public enum SpinePipelineDecision: Equatable {
-    case autoAccepted(title: String, author: String, score: Double)
+    case autoAccepted(title: String, author: String, workKey: String, score: Double)
     case needsConfirmation(candidates: [SpinePipelineCandidate])
     case noMatch
     case didNotPassQualityGate
@@ -200,7 +253,15 @@ public final class SpineIdentificationEngine {
         self.recognitionLanguages = recognitionLanguages
     }
 
-    public func run(on image: CGImage, catalog: BookCatalog?) async throws -> SpinePipelineResult {
+    /// `progress` fires after each spine's OCR (and, when matching is on,
+    /// after each catalog match). Pass `matchCatalog: false` to skip OL
+    /// retrieve/rerank and treat OCR text as the title.
+    public func run(
+        on image: CGImage,
+        catalog: BookCatalog?,
+        matchCatalog: Bool = true,
+        progress: (@Sendable (SpinePipelineProgress) -> Void)? = nil
+    ) async throws -> SpinePipelineResult {
         // Plain clock reads around each existing sequential stage --
         // per the Book ID Telemetry plan §"No engine callback/delegate
         // API," this is the entire timing mechanism: no sink threaded
@@ -210,11 +271,16 @@ public final class SpineIdentificationEngine {
         let totalStart = clock.now
         var phaseTimingsMs: [String: Double] = [:]
 
+        // Honest determinate count from the first moment (FUNC §5.2): the
+        // full-frame pass is area one; the total grows in one report if a
+        // jigsaw plan adds re-inference areas.
+        progress?(SpinePipelineProgress(phase: .detecting, completed: 0, total: 1))
+
         // §D/§F: full-frame barcode detect runs first, ahead of the capture
         // gate -- "even if capture gate would fail" a unique ISBN hit must
         // still short-circuit straight to an accepted result.
         let barcodeScanStart = clock.now
-        let isbnHits = detectISBNHits(in: image, catalog: catalog)
+        let isbnHits = matchCatalog ? detectISBNHits(in: image, catalog: catalog) : []
         phaseTimingsMs[PipelinePhase.barcodeScan.rawValue] = Self.milliseconds(from: barcodeScanStart, to: clock.now)
 
         if let hit = uniqueWorkShortCircuit(isbnHits: isbnHits, image: image) {
@@ -245,11 +311,27 @@ public final class SpineIdentificationEngine {
         // to risk neighbor bleed or missed spines (see `denseShelfDetect`
         // / docs/BOOK_ID_IOS_PIPELINE.md §Delivery sequencing step 2).
         let detectStart = clock.now
+        var plannedAreaCount = 0
         let denseResult = try denseShelfDetect(
             image: image,
             predict: { [detector, detectionOptions] img in try detector.predict(img, options: detectionOptions) },
             options: detectionOptions,
-            denseOptions: denseShelfOptions
+            denseOptions: denseShelfOptions,
+            progress: { event in
+                switch event {
+                case .firstPass(let firstDetections, let plannedAreaRects):
+                    plannedAreaCount = plannedAreaRects.count
+                    progress?(SpinePipelineProgress(
+                        phase: .detecting, completed: 1, total: 1 + plannedAreaCount,
+                        detections: firstDetections, areaRects: plannedAreaRects
+                    ))
+                case .areaCompleted(let index):
+                    progress?(SpinePipelineProgress(
+                        phase: .detecting, completed: 2 + index, total: 1 + plannedAreaCount,
+                        completedAreaIndex: index
+                    ))
+                }
+            }
         )
         let detections = denseResult.detections
         phaseTimingsMs[PipelinePhase.detect.rawValue] = Self.milliseconds(from: detectStart, to: clock.now)
@@ -263,39 +345,67 @@ public final class SpineIdentificationEngine {
             jobsByID[detection.id] = OCRJob(detection: detection, crop: crop)
         }
 
+        // First `.reading` report carries the detection geometry so the UI
+        // can outline every found spine before any OCR completes.
+        progress?(SpinePipelineProgress(
+            phase: .reading, completed: 0, total: jobsByID.count, detections: detections
+        ))
+
         let ocrStart = clock.now
-        let ocrResults = await runOCR(jobs: Array(jobsByID.values), catalog: catalog)
+        let ocrResults = await runOCR(jobs: Array(jobsByID.values), catalog: matchCatalog ? catalog : nil) { completed, total, latestText, detectionID in
+            progress?(SpinePipelineProgress(
+                phase: .reading, completed: completed, total: total, latestText: latestText,
+                completedDetectionID: detectionID
+            ))
+        }
         phaseTimingsMs[PipelinePhase.ocr.rawValue] = Self.milliseconds(from: ocrStart, to: clock.now)
 
         let fmStart = clock.now
-        let fmQueryOverrides = await runFMEscalation(ocrResults: ocrResults)
+        let fmQueryOverrides = matchCatalog ? await runFMEscalation(ocrResults: ocrResults) : [:]
         phaseTimingsMs[PipelinePhase.fmEscalation.rawValue] = Self.milliseconds(from: fmStart, to: clock.now)
 
         let matchStart = clock.now
         var spines: [SpinePipelineSpine] = []
-        for detection in detections {
-            guard let ocr = ocrResults[detection.id] else { continue }
+        if matchCatalog {
+            let matchTotal = detections.count
+            progress?(SpinePipelineProgress(phase: .matching, completed: 0, total: matchTotal))
+            for (index, detection) in detections.enumerated() {
+                await Task.yield()
+                defer { progress?(SpinePipelineProgress(phase: .matching, completed: index + 1, total: matchTotal, completedDetectionID: detection.id)) }
+                guard let ocr = ocrResults[detection.id] else { continue }
 
-            guard ocr.passedQualityGate, !ocr.assembledText.isEmpty else {
+                guard ocr.passedQualityGate, !ocr.assembledText.isEmpty else {
+                    spines.append(SpinePipelineSpine(
+                        id: detection.id, detection: detection, assembledText: ocr.assembledText,
+                        ocrQualityScore: ocr.qualityScore, decision: .didNotPassQualityGate, source: .ocr, matchMargin: nil
+                    ))
+                    continue
+                }
+
+                let fmOverride = fmQueryOverrides[detection.id]
+                let queries = fmOverride.map { SpineRoleQueryBuilder.build(fmTitle: $0.title, fmAuthor: $0.author) } ?? ocr.roleQueries
+                let (decision, margin) = try await matchDecisionOffMain(for: queries, catalog: catalog)
                 spines.append(SpinePipelineSpine(
                     id: detection.id, detection: detection, assembledText: ocr.assembledText,
-                    ocrQualityScore: ocr.qualityScore, decision: .didNotPassQualityGate, source: .ocr, matchMargin: nil
+                    ocrQualityScore: ocr.qualityScore, decision: decision,
+                    source: fmOverride != nil ? .fmAssisted : .ocr, matchMargin: margin
                 ))
-                continue
             }
-
-            // §G: an FM override replaces the geometry-derived role
-            // queries with FM's own clean title/author reading, but still
-            // flows through the identical retrieve/rerank/accept path
-            // (`matchDecision` below) as any other spine.
-            let fmOverride = fmQueryOverrides[detection.id]
-            let queries = fmOverride.map { SpineRoleQueryBuilder.build(fmTitle: $0.title, fmAuthor: $0.author) } ?? ocr.roleQueries
-            let (decision, margin) = try matchDecision(for: queries, catalog: catalog)
-            spines.append(SpinePipelineSpine(
-                id: detection.id, detection: detection, assembledText: ocr.assembledText,
-                ocrQualityScore: ocr.qualityScore, decision: decision,
-                source: fmOverride != nil ? .fmAssisted : .ocr, matchMargin: margin
-            ))
+        } else {
+            for detection in detections {
+                guard let ocr = ocrResults[detection.id] else { continue }
+                let text = ocr.assembledText.trimmingCharacters(in: .whitespacesAndNewlines)
+                let decision: SpinePipelineDecision
+                if ocr.passedQualityGate, !text.isEmpty {
+                    decision = .autoAccepted(title: text, author: "", workKey: "", score: 0)
+                } else {
+                    decision = .didNotPassQualityGate
+                }
+                spines.append(SpinePipelineSpine(
+                    id: detection.id, detection: detection, assembledText: ocr.assembledText,
+                    ocrQualityScore: ocr.qualityScore, decision: decision, source: .ocr, matchMargin: nil
+                ))
+            }
         }
         phaseTimingsMs[PipelinePhase.match.rawValue] = Self.milliseconds(from: matchStart, to: clock.now)
 
@@ -364,7 +474,7 @@ public final class SpineIdentificationEngine {
         )
         let spine = SpinePipelineSpine(
             id: fullFrame.id, detection: fullFrame, assembledText: "", ocrQualityScore: 1,
-            decision: .autoAccepted(title: winner.title, author: winner.author, score: 100),
+            decision: .autoAccepted(title: winner.title, author: winner.author, workKey: winner.workKey, score: 100),
             source: .barcode, matchMargin: nil
         )
         return (spine, hit.isbn13)
@@ -394,7 +504,7 @@ public final class SpineIdentificationEngine {
             let decision: SpinePipelineDecision
             if hit.candidates.count == 1 {
                 let winner = hit.candidates[0]
-                decision = .autoAccepted(title: winner.title, author: winner.author, score: 100)
+                decision = .autoAccepted(title: winner.title, author: winner.author, workKey: winner.workKey, score: 100)
             } else {
                 decision = .needsConfirmation(candidates: hit.candidates.map { SpinePipelineCandidate(candidate: $0, score: 100) })
             }
@@ -407,20 +517,30 @@ public final class SpineIdentificationEngine {
 
     /// Runs OCR over `jobs`, checking/populating the per-id cache around a
     /// capped-concurrency, visible-first scheduler pass for whatever isn't
-    /// already cached.
-    private func runOCR(jobs: [OCRJob], catalog: BookCatalog?) async -> [UUID: SpineOCRResult] {
+    /// already cached. Fires `progress(completed, total, latestText,
+    /// detectionID)` after each spine's OCR resolves -- including one call
+    /// per cache hit, so a UI revealing spines by id sees every spine.
+    private func runOCR(
+        jobs: [OCRJob], catalog: BookCatalog?,
+        progress: (@Sendable (Int, Int, String, UUID) -> Void)?
+    ) async -> [UUID: SpineOCRResult] {
+        let total = jobs.count
         var results: [UUID: SpineOCRResult] = [:]
         var uncached: [OCRJob] = []
         for job in jobs {
             if let cached = await ocrCache.value(for: job.detection.id) {
                 results[job.detection.id] = cached
+                progress?(results.count, total, cached.assembledText, job.detection.id)
             } else {
                 uncached.append(job)
             }
         }
+        let cachedCount = results.count
 
         guard !uncached.isEmpty else { return results }
-        let fresh = await runOCRUncached(jobs: uncached, router: makeProductionRouter(catalog: catalog))
+        let fresh = await runOCRUncached(jobs: uncached, router: makeProductionRouter(catalog: catalog)) { uncachedDone, latestText, detectionID in
+            progress?(cachedCount + uncachedDone, total, latestText, detectionID)
+        }
         for (id, result) in fresh {
             results[id] = result
             await ocrCache.store(result, for: id)
@@ -447,11 +567,22 @@ public final class SpineIdentificationEngine {
     /// configured `router` (e.g. the OCR Mac vs iOS parity harness) can
     /// run without contaminating, or being contaminated by, the
     /// per-instance `ocrCache` `run()` relies on for pan/rescan continuity.
-    private func runOCRUncached(jobs: [OCRJob], router: OCROrientationRouter) async -> [UUID: SpineOCRResult] {
+    /// `onEachResult` is called with the running count of completed jobs
+    /// after each one finishes -- used by `runOCR` to fire the progress
+    /// callback.
+    private func runOCRUncached(
+        jobs: [OCRJob], router: OCROrientationRouter,
+        onEachResult: (@Sendable (Int, String, UUID) -> Void)? = nil
+    ) async -> [UUID: SpineOCRResult] {
         let scheduler = CappedConcurrencyOCRScheduler(router: router, maxConcurrency: maxConcurrentOCR)
         let collected = ResultBox<[UUID: SpineOCRResult]>([:])
         await scheduler.run(jobs: jobs) { id, result in
-            collected.mutate { $0[id] = result }
+            var count = 0
+            collected.mutate { dict in
+                dict[id] = result
+                count = dict.count
+            }
+            onEachResult?(count, result.assembledText, id)
         }
         return collected.value
     }
@@ -522,12 +653,24 @@ public final class SpineIdentificationEngine {
     /// detection on the shelf.
     private static let maxConcurrentFM = 3
 
+    /// Same as `matchDecision`, but hops off the caller's actor so a
+    /// 100-spine FTS pass against `full.sqlite` cannot freeze the SwiftUI
+    /// spinner. `BookCatalog` is `@unchecked Sendable` (GRDB `DatabaseQueue`).
+    private func matchDecisionOffMain(for queries: SpineRoleQueries, catalog: BookCatalog?) async throws -> (SpinePipelineDecision, Double?) {
+        let policy = acceptPolicy
+        return try await Task.detached {
+            try Self.matchDecision(for: queries, catalog: catalog, acceptPolicy: policy)
+        }.value
+    }
+
     /// Retrieve -> field-aware rerank -> accept, via the single shared
     /// `BookCatalog.matchRoleAware` package API -- `AcceptPolicy` stays
     /// 90/8 by default; the margin `matchRoleAware` reports is surfaced
     /// for telemetry (§rerank-telemetry), not consumed by the decision
     /// itself.
-    private func matchDecision(for queries: SpineRoleQueries, catalog: BookCatalog?) throws -> (SpinePipelineDecision, Double?) {
+    private static func matchDecision(
+        for queries: SpineRoleQueries, catalog: BookCatalog?, acceptPolicy: AcceptPolicy
+    ) throws -> (SpinePipelineDecision, Double?) {
         // A nil catalog (not loaded, or a macOS --db/--catalog override that
         // failed to resolve) is an expected "match against nothing" case,
         // already surfaced separately via CatalogStore.lastError -- distinct
@@ -536,7 +679,7 @@ public final class SpineIdentificationEngine {
         let outcome = try catalog.matchRoleAware(queries, acceptPolicy: acceptPolicy)
         switch outcome.decision {
         case .autoAccept(let winner):
-            return (.autoAccepted(title: winner.candidate.title, author: winner.candidate.author, score: winner.score), outcome.margin)
+            return (.autoAccepted(title: winner.candidate.title, author: winner.candidate.author, workKey: winner.candidate.workKey, score: winner.score), outcome.margin)
         case .ambiguous(let top):
             let candidates = top.map { SpinePipelineCandidate(candidate: $0.candidate, score: $0.score) }
             return (.needsConfirmation(candidates: candidates), outcome.margin)
