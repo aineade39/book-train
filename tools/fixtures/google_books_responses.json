@@ -1,0 +1,537 @@
+{
+  "description": "Offline Google Books API replay for bookcase.jpg OCR eval. Replace with live captures via --record-fixtures when GOOGLE_BOOKS_API_KEY is set.",
+  "by_ocr": {
+    "lonely planet spain pull-out map": [
+      {
+        "id": "gb-spain1",
+        "volumeInfo": {
+          "title": "Lonely Planet Spain",
+          "publishedDate": "2010",
+          "authors": [
+            "Lonely Planet"
+          ]
+        }
+      },
+      {
+        "id": "gb-spain2",
+        "volumeInfo": {
+          "title": "Spain",
+          "publishedDate": "2010",
+          "authors": [
+            "John Doe"
+          ]
+        }
+      },
+      {
+        "id": "gb-spain3",
+        "volumeInfo": {
+          "title": "Lonely Planet Best of Paris 2021",
+          "publishedDate": "2010",
+          "authors": [
+            "Lonely Planet"
+          ]
+        }
+      }
+    ],
+    "lonely planet argentina includes uruguay": [
+      {
+        "id": "gb-arg1",
+        "volumeInfo": {
+          "title": "Lonely Planet Argentina",
+          "publishedDate": "2010",
+          "authors": [
+            "Lonely Planet"
+          ]
+        }
+      },
+      {
+        "id": "gb-arg2",
+        "volumeInfo": {
+          "title": "Planet of Exile",
+          "publishedDate": "2010",
+          "authors": [
+            "Ursula K. Le Guin"
+          ]
+        }
+      }
+    ],
+    "lonely planet ireland pull-out map": [
+      {
+        "id": "gb-ire1",
+        "volumeInfo": {
+          "title": "Lonely Planet Ireland",
+          "publishedDate": "2010",
+          "authors": [
+            "Lonely Planet"
+          ]
+        }
+      },
+      {
+        "id": "gb-ire2",
+        "volumeInfo": {
+          "title": "Ireland's Best Walks",
+          "publishedDate": "2010",
+          "authors": [
+            "Helen Fairbairn"
+          ]
+        }
+      }
+    ],
+    "100 best cross-country ski trails washington third edition kirkendall spring": [
+      {
+        "id": "gb-ski1",
+        "volumeInfo": {
+          "title": "100 Best Cross-Country Ski Trails in Washington",
+          "publishedDate": "2010",
+          "authors": [
+            "Vicky Spring",
+            "Tom Kirkendall"
+          ]
+        }
+      },
+      {
+        "id": "gb-ski2",
+        "volumeInfo": {
+          "title": "Cross-Country Skiing",
+          "publishedDate": "2010",
+          "authors": [
+            "Steve Barnett"
+          ]
+        }
+      },
+      {
+        "id": "gb-ski3",
+        "volumeInfo": {
+          "title": "100 Best Crossword Puzzles for Adults",
+          "publishedDate": "2010",
+          "authors": [
+            "Editors"
+          ]
+        }
+      }
+    ],
+    "oncly pi france paris pull-but map": [
+      {
+        "id": "gb-fr1",
+        "volumeInfo": {
+          "title": "Lonely Planet France",
+          "publishedDate": "2010",
+          "authors": [
+            "Lonely Planet"
+          ]
+        }
+      },
+      {
+        "id": "gb-fr2",
+        "volumeInfo": {
+          "title": "Paris, France",
+          "publishedDate": "2010",
+          "authors": [
+            "Travel Guides Inc"
+          ]
+        }
+      },
+      {
+        "id": "gb-fr3",
+        "volumeInfo": {
+          "title": "Paris and the Parisians in 1835",
+          "publishedDate": "2010",
+          "authors": [
+            "M. Word Press"
+          ]
+        }
+      }
+    ],
+    "maps to use easy- the national parks the complete guide to of the west fodors": [
+      {
+        "id": "gb-np1",
+        "volumeInfo": {
+          "title": "Fodor's The Complete Guide to the National Parks of the West",
+          "publishedDate": "2010",
+          "authors": [
+            "Fodor's"
+          ]
+        }
+      },
+      {
+        "id": "gb-np2",
+        "volumeInfo": {
+          "title": "Guide to National Parks",
+          "publishedDate": "2010",
+          "authors": [
+            "National Geographic"
+          ]
+        }
+      }
+    ],
+    "8 edition mountaineering the freedom of the hills": [
+      {
+        "id": "gb-mtn1",
+        "volumeInfo": {
+          "title": "Mountaineering: The Freedom of the Hills",
+          "publishedDate": "2010",
+          "authors": [
+            "The Mountaineers"
+          ]
+        }
+      },
+      {
+        "id": "gb-mtn2",
+        "volumeInfo": {
+          "title": "Freedom of the Hills",
+          "publishedDate": "2010",
+          "authors": [
+            "Editors"
+          ]
+        }
+      }
+    ],
+    "day hiking snoqualmie region": [
+      {
+        "id": "gb-dh1",
+        "volumeInfo": {
+          "title": "Day Hiking Snoqualmie Region",
+          "publishedDate": "2010",
+          "authors": [
+            "Craig Romano"
+          ]
+        }
+      },
+      {
+        "id": "gb-dh2",
+        "volumeInfo": {
+          "title": "Go Hiking!",
+          "publishedDate": "2010",
+          "authors": [
+            "Someone"
+          ]
+        }
+      },
+      {
+        "id": "gb-dh3",
+        "volumeInfo": {
+          "title": "Hiking Wyoming's Wind River Range",
+          "publishedDate": "2010",
+          "authors": [
+            "Ron Adkison"
+          ]
+        }
+      }
+    ],
+    "history of a traveller's ireland": [
+      {
+        "id": "gb-hist1",
+        "volumeInfo": {
+          "title": "History of a Traveller's Ireland",
+          "publishedDate": "2010",
+          "authors": [
+            "Various"
+          ]
+        }
+      },
+      {
+        "id": "gb-hist2",
+        "volumeInfo": {
+          "title": "Ireland: A History",
+          "publishedDate": "2010",
+          "authors": [
+            "Robert Kee"
+          ]
+        }
+      }
+    ],
+    "moon victoria & vlanduver expert advice": [
+      {
+        "id": "gb-moon1",
+        "volumeInfo": {
+          "title": "Moon Vancouver & Victoria",
+          "publishedDate": "2010",
+          "authors": [
+            "Avalon Travel"
+          ]
+        }
+      },
+      {
+        "id": "gb-moon2",
+        "volumeInfo": {
+          "title": "Victoria & Vancouver Island",
+          "publishedDate": "2010",
+          "authors": [
+            "Moon Travel"
+          ]
+        }
+      },
+      {
+        "id": "gb-moon3",
+        "volumeInfo": {
+          "title": "New Moon",
+          "publishedDate": "2010",
+          "authors": [
+            "Stephenie Meyer"
+          ]
+        }
+      }
+    ],
+    "backpacking washington 2nd edition": [
+      {
+        "id": "gb-bp1",
+        "volumeInfo": {
+          "title": "Backpacking Washington",
+          "publishedDate": "2010",
+          "authors": [
+            "Craig Romano"
+          ]
+        }
+      },
+      {
+        "id": "gb-bp2",
+        "volumeInfo": {
+          "title": "George Washington: A Life",
+          "publishedDate": "2010",
+          "authors": [
+            "Ron Chernow"
+          ]
+        }
+      }
+    ],
+    "pacific northwest mountains natural history of the daniel mathews": [
+      {
+        "id": "gb-nhm1",
+        "volumeInfo": {
+          "title": "Natural History of the Pacific Northwest Mountains",
+          "publishedDate": "2010",
+          "authors": [
+            "Daniel Mathews"
+          ]
+        }
+      },
+      {
+        "id": "gb-nhm2",
+        "volumeInfo": {
+          "title": "History of the Devil",
+          "publishedDate": "2010",
+          "authors": [
+            "Various"
+          ]
+        }
+      }
+    ],
+    "bentley  hiking washington's history": [
+      {
+        "id": "gb-hwh1",
+        "volumeInfo": {
+          "title": "Hiking Washington's History",
+          "publishedDate": "2010",
+          "authors": [
+            "Judy Bentley"
+          ]
+        }
+      },
+      {
+        "id": "gb-hwh2",
+        "volumeInfo": {
+          "title": "Washington's History",
+          "publishedDate": "2010",
+          "authors": [
+            "Harry Ritter"
+          ]
+        }
+      }
+    ],
+    "loneyplonet epic hikes of the world": [
+      {
+        "id": "gb-epic1",
+        "volumeInfo": {
+          "title": "Epic Hikes of the World",
+          "publishedDate": "2010",
+          "authors": [
+            "Lonely Planet"
+          ]
+        }
+      },
+      {
+        "id": "gb-epic2",
+        "volumeInfo": {
+          "title": "Epic Runs of the World",
+          "publishedDate": "2010",
+          "authors": [
+            "Lonely Planet"
+          ]
+        }
+      }
+    ],
+    "day hiking central cascades": [
+      {
+        "id": "gb-dhc1",
+        "volumeInfo": {
+          "title": "Day Hiking Central Cascades",
+          "publishedDate": "2010",
+          "authors": [
+            "Craig Romano"
+          ]
+        }
+      }
+    ],
+    "lonely planet denmark & the faroe islands": [
+      {
+        "id": "gb-dk1",
+        "volumeInfo": {
+          "title": "Lonely Planet Denmark & the Faroe Islands",
+          "publishedDate": "2010",
+          "authors": [
+            "Lonely Planet"
+          ]
+        }
+      }
+    ],
+    "afalcon guide\u00ae hiking river gorge the columbia": [
+      {
+        "id": "gb-crg1",
+        "volumeInfo": {
+          "title": "Hiking the Columbia River Gorge",
+          "publishedDate": "2010",
+          "authors": [
+            "Falcon Guides"
+          ]
+        }
+      },
+      {
+        "id": "gb-crg2",
+        "volumeInfo": {
+          "title": "Columbia River Gorge",
+          "publishedDate": "2010",
+          "authors": [
+            "Scott Cook"
+          ]
+        }
+      }
+    ],
+    "day hiking eastern washington": [
+      {
+        "id": "gb-dhe1",
+        "volumeInfo": {
+          "title": "Day Hiking Eastern Washington",
+          "publishedDate": "2010",
+          "authors": [
+            "Craig Romano"
+          ]
+        }
+      }
+    ],
+    "ireland's best walks a walking guide helen fairbairn": [
+      {
+        "id": "gb-walk1",
+        "volumeInfo": {
+          "title": "Ireland's Best Walks",
+          "publishedDate": "2010",
+          "authors": [
+            "Helen Fairbairn"
+          ]
+        }
+      }
+    ],
+    "world food mexico": [
+      {
+        "id": "gb-wf1",
+        "volumeInfo": {
+          "title": "World Food: Mexico",
+          "publishedDate": "2010",
+          "authors": [
+            "Lonely Planet"
+          ]
+        }
+      },
+      {
+        "id": "gb-wf2",
+        "volumeInfo": {
+          "title": "World Food Mexico City",
+          "publishedDate": "2010",
+          "authors": [
+            "Lonely Planet"
+          ]
+        }
+      }
+    ],
+    "romano urban trails eastside": [
+      {
+        "id": "gb-ute1",
+        "volumeInfo": {
+          "title": "Urban Trails: Eastside",
+          "publishedDate": "2010",
+          "authors": [
+            "Craig Romano"
+          ]
+        }
+      }
+    ],
+    "rick steves. portugal edition \u043f1\u0442h foldout": [
+      {
+        "id": "gb-pt1",
+        "volumeInfo": {
+          "title": "Rick Steves Portugal",
+          "publishedDate": "2010",
+          "authors": [
+            "Rick Steves"
+          ]
+        }
+      },
+      {
+        "id": "gb-pt2",
+        "volumeInfo": {
+          "title": "Rick Steves' Florence and Tuscany 2008",
+          "publishedDate": "2010",
+          "authors": [
+            "Rick Steves"
+          ]
+        }
+      }
+    ],
+    "map pull-out seattle washington oregon & the pacific northwest lonely planet": [
+      {
+        "id": "gb-pnw1",
+        "volumeInfo": {
+          "title": "Lonely Planet Washington, Oregon & the Pacific Northwest",
+          "publishedDate": "2010",
+          "authors": [
+            "Lonely Planet"
+          ]
+        }
+      }
+    ],
+    "lonely plonet the pacific northwest's best trips 32 amazino road trips  pull out map": [
+      {
+        "id": "gb-trips1",
+        "volumeInfo": {
+          "title": "Pacific Northwest's Best Trips",
+          "publishedDate": "2010",
+          "authors": [
+            "Lonely Planet"
+          ]
+        }
+      },
+      {
+        "id": "gb-trips2",
+        "volumeInfo": {
+          "title": "Lonely Planet Best Road Trips USA",
+          "publishedDate": "2010",
+          "authors": [
+            "Lonely Planet"
+          ]
+        }
+      }
+    ],
+    "washington's glacier peak region 100\u00b7": [
+      {
+        "id": "gb-gp1",
+        "volumeInfo": {
+          "title": "100 Hikes in Washington's Glacier Peak Region",
+          "publishedDate": "2010",
+          "authors": [
+            "Ira Spring",
+            "Harvey Manning"
+          ]
+        }
+      }
+    ]
+  }
+}

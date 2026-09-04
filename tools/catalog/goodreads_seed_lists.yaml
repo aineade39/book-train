@@ -1,0 +1,138 @@
+# Starting set of Goodreads Listopia lists to seed the shelf-score scrape.
+#
+# Every id/slug below was verified live (browsed directly, not guessed) in
+# July 2026 — see book_count for what was observed at that time; it will
+# have grown by the time this actually runs. Deliberately small and 100%
+# real rather than padded out to ~50 with plausible-looking guessed ids:
+# a wrong id either 404s or silently scrapes the wrong list, and the
+# `list_discovery` profile (scrape-harness sites/goodreads/profiles/
+# list_discovery.yaml) exists specifically to grow this set safely by
+# crawling /list/tag/{genre} pages instead of guessing. Run discovery for
+# genres you want more coverage of, review the results, then append here.
+#
+# tools/scrape_goodreads_lists.py reads this file; each entry maps directly
+# to `--set list_id=... --set slug=...` for the `list_show` profile, run via
+# a sibling scrape-harness checkout (~/dev/scrape-harness by default). See
+# docs/BOOK_CATALOG.md's "scrape-harness dependency" section for the full
+# pipeline (profiles used, the JSONL field contract with
+# tools/catalog/match_goodreads.py, and where the scraped data lives).
+#
+# `list_type` (optional, defaults to `genre` when omitted) is read by
+# tools/catalog/analyze_goodreads_lists.py: `anchor` marks the single broad
+# popularity list that's always kept regardless of overlap; see
+# docs/BOOK_CATALOG.md's "Curating Goodreads seed lists" section.
+#
+# `short_label`/`list_title` (both optional) are read by
+# tools/catalog/match_goodreads.py's load_seed_metadata() to build
+# genre_tags.json (tag -> display name). Omitted entries fall back to a
+# title-cased `genre` and an underscore-to-space'd `slug`, respectively —
+# no edits required for existing entries.
+lists:
+  - list_id: 1
+    slug: Best_Books_Ever
+    genre: general
+    list_type: anchor
+    book_count_observed: 79001
+  - list_id: 3
+    slug: Best_Science_Fiction_Fantasy_Books
+    genre: scifi_fantasy
+    book_count_observed: 8772
+  - list_id: 15
+    slug: Best_Historical_Fiction
+    genre: historical_fiction
+    book_count_observed: 8038
+  - list_id: 348
+    slug: Thrillers
+    genre: thriller
+    book_count_observed: 4973
+  - list_id: 367
+    slug: Best_Fantasy_Books
+    genre: fantasy
+    book_count_observed: 1711
+  - list_id: 8329
+    slug: Best_Romance_Books_Ever
+    genre: romance
+    book_count_observed: 3342
+  # Was list_id 8637 (Best_Young_Adult_Books_Fantasy_Historical_Fiction_etc_,
+  # only 100 books observed) -- a narrow niche list rather than the genre's
+  # real flagship. Found via `list_discovery --set genre=young-adult` (Aug
+  # 2026) and verified live; note this one is itself big enough (13,333) to
+  # hit the anonymous/authenticated Listopia 100-page (10,000-book) cap
+  # confirmed in docs/BOOK_CATALOG.md, so expect ~10k scraped rather than
+  # the full count -- still a large improvement over the old 100-book pick.
+  - list_id: 43
+    slug: Best_Young_Adult_Books
+    genre: young_adult
+    book_count_observed: 13333
+  - list_id: 19341
+    slug: Best_Science_Fiction
+    genre: scifi
+    book_count_observed: 3857
+  # Was list_id 11011 (Best_Classics_of_all_Time, only 71 books observed).
+  # Found via `list_discovery --set genre=classics` (Aug 2026) and verified
+  # live -- a well-known cross-genre literary canon list rather than a
+  # narrowly-scoped "classics" list, but far larger and more representative.
+  - list_id: 952
+    slug: 1001_Books_You_Must_Read_Before_You_Die
+    genre: classics
+    book_count_observed: 1320
+  # Was list_id 195574 (The_Most_Popular_Mysteries_on_Goodreads, only 276
+  # books observed). Found via `list_discovery --set genre=mystery` (Aug
+  # 2026) and verified live.
+  - list_id: 73283
+    slug: 100_Mysteries_and_Thrillers_to_Read_in_a_Lifetime_Readers_Picks
+    genre: mystery
+    book_count_observed: 2577
+  # --- Below: new genres added Aug 2026, found via `list_discovery` for
+  # genre tags with no prior seed coverage (horror, nonfiction, biography,
+  # poetry, humor, graphic novels, LGBT+, self-help, cookbooks, historical
+  # romance) and verified live before adding -- see docs/BOOK_CATALOG.md's
+  # "Curating Goodreads seed lists" section for the discovery workflow.
+  - list_id: 281
+    slug: Best_Memoir_Biography_Autobiography
+    genre: biography
+    book_count_observed: 6625
+  - list_id: 3187
+    slug: Interesting_and_Readable_Nonfiction
+    genre: nonfiction
+    book_count_observed: 4569
+  - list_id: 312
+    slug: Best_Humorous_Books
+    genre: humor
+    book_count_observed: 4472
+  - list_id: 210
+    slug: Best_Graphic_Novels
+    genre: graphic_novels
+    book_count_observed: 3510
+  - list_id: 36
+    slug: Best_Poetry_Books
+    genre: poetry
+    book_count_observed: 3055
+  - list_id: 135
+    slug: Best_Horror_Novels
+    genre: horror
+    book_count_observed: 2136
+  - list_id: 27443
+    slug: 100_Best_Lesbian_Fiction_Memoir_Books_Of_All_Time_
+    genre: lgbt
+    book_count_observed: 879
+  # Best real flagship list surfaced for the "childrens" tag crawl was this
+  # picture-books list -- no broad "Best Children's Books" list surfaced
+  # (mostly narrow sub-lists by decade/theme), so scoped the genre tag to
+  # match what was actually found rather than overclaiming coverage.
+  - list_id: 460
+    slug: Best_Picture_Books
+    genre: picture_books
+    book_count_observed: 3265
+  - list_id: 7616
+    slug: Motivational_and_Self_Improvement_Books
+    genre: self_help
+    book_count_observed: 3281
+  - list_id: 185
+    slug: Best_Cookbooks
+    genre: cookbooks
+    book_count_observed: 1478
+  - list_id: 224
+    slug: Favorite_Historical_Romance_Novels
+    genre: historical_romance
+    book_count_observed: 3496

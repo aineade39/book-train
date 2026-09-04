@@ -1,0 +1,62 @@
+# Hand-curated pairs of definitely-different books that the bibliographic
+# matcher (tools/catalog/bibliographic_join.py) must never resolve to the
+# same OL workKey. See bibliographic_join.evaluate_adversarial_pairs and
+# docs/BOOK_CATALOG.md's evaluation-protocol section.
+#
+# Each pair is scored against the *real* OL candidate index (built from
+# full.sqlite via match_goodreads.py --eval-isbn-holdout), not a synthetic
+# fixture -- a false merge here means the production matcher, run against
+# production data, collapsed two different books into one identity. Keep
+# this set small and hand-verified; every entry must name two books that
+# really exist and are really different, not a hypothetical.
+#
+# Add a new pair whenever a real false merge is found (in this eval, in the
+# agent-loop's Failure Analyst output, or by hand) -- that is the set's
+# intended growth path, not a one-time curation.
+
+pairs:
+  - title_a: "Twilight"
+    author_a: "Stephenie Meyer"
+    title_b: "Twilight"
+    author_b: "Dean Koontz"
+    note: >
+      Same exact title, unrelated books by different authors -- the
+      original failure mode this matcher was built to fix (the author gate
+      must disambiguate on title collision, not just title-score).
+
+  - title_a: "Untamed"
+    author_a: "Max Brand"
+    title_b: "Untamed"
+    author_b: "Glennon Doyle"
+    note: >
+      Same title; a 1919 Western pulp novel vs. a 2020 memoir. Regression
+      guard for names_compatible's maiden-name/extra-token handling not
+      becoming permissive enough to bridge unrelated authors.
+
+  - title_a: "The Hunger Games"
+    author_a: "Suzanne Collins"
+    title_b: "The Hunger Games Official Illustrated Movie Companion"
+    author_b: "Suzanne Collins"
+    note: >
+      Same author, near-superset title tokens. Regression guard for
+      token_sort_ratio (length-sensitive) not tying a companion/guide to
+      the novel it accompanies -- the original token_set_ratio failure
+      this matcher replaced.
+
+  - title_a: "Twilight"
+    author_a: "Stephenie Meyer"
+    title_b: "New Moon"
+    author_b: "Stephenie Meyer"
+    note: >
+      Same series, same author, different books -- guards against a
+      title-scoring change that gets too permissive within a series
+      (e.g. blocking or accept-threshold changes aimed at series titles).
+
+  - title_a: "The Giver"
+    author_a: "Lois Lowry"
+    title_b: "The Giver Quartet"
+    author_b: "Lois Lowry"
+    note: >
+      A single novel vs. the four-book box-set omnibus of the same
+      series and author -- must resolve to two different OL works, not
+      collapse to one just because "quartet" gets stripped as noise.

@@ -1,0 +1,51 @@
+services:
+  vpn:
+    image: qmcgaw/gluetun
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    env_file:
+      - .env
+    environment:
+      VPN_SERVICE_PROVIDER: mullvad
+      VPN_TYPE: wireguard
+      SERVER_COUNTRIES: USA
+      SERVER_CITIES: New York NY,Los Angeles CA,Chicago IL,Dallas TX,Seattle WA,Atlanta GA,Miami FL,Ashburn VA
+      # Port 8000 is not published. Auth none is loopback-only (shared netns).
+      HTTP_CONTROL_SERVER_AUTH_DEFAULT_ROLE: '{"auth":"none"}'
+    restart: unless-stopped
+
+  scrape:
+    build:
+      context: ../..
+      additional_contexts:
+        scrape-harness: ../../../scrape-harness
+      args:
+        BOOK_TRAIN_REV: ${BOOK_TRAIN_REV:-unknown}
+        HARNESS_REV: ${HARNESS_REV:-unknown}
+      dockerfile: tools/scrape-container/Dockerfile
+    platform: linux/amd64
+    network_mode: service:vpn
+    depends_on:
+      vpn:
+        condition: service_healthy
+    restart: "no"
+    environment:
+      BOOK_SPINES_DATA: /data/book-spines
+      HARNESS_ROOT: /app/scrape-harness
+      DISPLAY: ":99"
+      MULLVAD_ROTATE: ${MULLVAD_ROTATE:-1}
+      MULLVAD_BACKEND: gluetun
+      GLUETUN_URL: http://127.0.0.1:8000
+      VPN_STATUS_URL: http://127.0.0.1:8000/v1/vpn/status
+      MAX_REQUESTS: ${MAX_REQUESTS:-120}
+    volumes:
+      - ${BOOK_SPINES_DATA:-${HOME}/ml/book-spines}:/data/book-spines
+      - browser_profiles:/app/scrape-harness/.data/browser_profiles
+      - ${HARNESS_HOST:-../../../scrape-harness}/sites/goodreads/profiles/book_show_api_chunked.yaml:/app/scrape-harness/sites/goodreads/profiles/book_show_api_chunked.yaml
+      - ${HARNESS_HOST:-../../../scrape-harness}/sites/goodreads/har/next_build.yaml:/app/scrape-harness/sites/goodreads/har/next_build.yaml
+      - ${HARNESS_HOST:-../../../scrape-harness}/config/vpn_baseline.json:/app/scrape-harness/config/vpn_baseline.json
+
+volumes:
+  browser_profiles:

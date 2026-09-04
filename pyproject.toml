@@ -1,0 +1,28 @@
+[project]
+name = "book-train"
+version = "0.1.0"
+description = "YOLO-OBB book-spine detection training tools and catalog CLIs"
+requires-python = ">=3.12"
+dependencies = [
+    "numpy>=2.0",
+    "opencv-python-headless>=4.8",
+    "pillow>=10",
+    "playwright>=1.62.0",
+    "pyyaml>=6",
+    "rapidfuzz>=3.14",
+    "ultralytics>=8.4",
+]
+
+[dependency-groups]
+# ISBN loop in the scrape container (no Ultralytics/torch).
+scrape = [
+    "pyyaml>=6",
+    "rapidfuzz>=3.14",
+]
+# Core ML export / rotation-sweep stack (`.venv-export`, Python 3.12).
+export = [
+    "coremltools>=9",
+]
+
+[tool.uv]
+package = false

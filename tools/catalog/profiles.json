@@ -1,0 +1,29 @@
+{
+  "profiles": {
+    "full": {
+      "max_works": null,
+      "languages": [],
+      "min_editions": 1,
+      "description": "Mac — entire qualifying Open Library corpus"
+    },
+    "ios_en": {
+      "max_works": 250000,
+      "languages": ["eng"],
+      "min_editions": 2,
+      "description": "iOS bundle — English, popular works"
+    },
+    "dev_smoke": {
+      "max_works": 10000,
+      "languages": ["eng"],
+      "min_editions": 1,
+      "description": "CI / local dev smoke catalog"
+    },
+    "ios_en_shelf": {
+      "max_works": 250000,
+      "languages": ["eng"],
+      "min_editions": 2,
+      "description": "iOS bundle — like ios_en, but popularityRank is re-ranked (and gap-filled) using Goodreads Listopia shelf signals instead of raw OL edition count alone.",
+      "custom_build_script": "tools/catalog/build_ios_en_from_goodreads.py"
+    }
+  }
+}

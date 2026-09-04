@@ -1,0 +1,13 @@
+{
+  "scenes_dir": "~/dev/optimize-gemini/fixtures/assets/scenes",
+  "scenes": [
+    { "image": "bedroom1.jpeg", "gt_est": 14 },
+    { "image": "bookcase.jpg", "gt_est": 120 },
+    { "image": "bookcase_shelf1.jpg", "gt_est": 28 },
+    { "image": "bookcase_shelf2.jpg", "gt_est": 35 },
+    { "image": "bookcase_shelf3.jpg", "gt_est": 30 },
+    { "image": "office1.jpeg", "gt_est": 180 },
+    { "image": "office2.jpeg", "gt_est": 200 },
+    { "image": "office3.jpeg", "gt_est": 120 }
+  ]
+}
