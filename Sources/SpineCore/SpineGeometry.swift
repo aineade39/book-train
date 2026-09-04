@@ -71,7 +71,7 @@ public func circularMean(_ angles: [Double]) -> Double {
 // MARK: - OBB detection
 
 /// One oriented bounding box detection in full-scene pixel coordinates.
-public struct OBBDetection {
+public struct OBBDetection: Sendable {
     public var cx: Double
     public var cy: Double
     public var w: Double
@@ -276,7 +276,9 @@ public func clipPolygon(_ subject: [CGPoint], edgeA: CGPoint, edgeB: CGPoint) ->
     return out
 }
 
-/// Intersection area of two (convex) polygons via repeated half-plane clipping.
+/// Intersection area of two polygons via repeated half-plane clipping. Exact
+/// only while the *clip* polygon `b` is convex; use
+/// `simplePolyIntersectionArea` when either side may be a non-convex piece.
 public func polyIntersectionArea(_ a: [CGPoint], _ b: [CGPoint]) -> Double {
     var inter = a
     for i in 0..<b.count {

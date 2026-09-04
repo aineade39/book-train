@@ -407,7 +407,8 @@ public func planCrops(
     colGapK: Double = 1.0,
     minBlockMembers: Int = 2,
     imgsz: Int = 1024,
-    maxCropDimK: Double = 1.5
+    maxCropDimK: Double = 1.5,
+    bandsOnly: Bool = false
 ) -> [CropPlan] {
     guard let energy = EdgeEnergy(raster: raster) else { return [] }
     let maxDim = maxCropDimK * Double(imgsz)
@@ -420,9 +421,11 @@ public func planCrops(
         rowSpans.append((.horizontal(atY: 0), .horizontal(atY: Double(imgH)), []))
     } else {
         let extents = originalBands.map { bandExtent(dets, $0) }
-        let expansions = originalBands.map {
-            splitOversizedGroup(dets, group: $0, energy: energy, axis: .y, maxDim: maxDim, minSplitMembers: minBlockMembers, imgW: imgW, imgH: imgH)
-        }
+        let expansions = bandsOnly
+            ? originalBands.map { (subBands: [$0], internalSeams: [Line]()) }
+            : originalBands.map {
+                splitOversizedGroup(dets, group: $0, energy: energy, axis: .y, maxDim: maxDim, minSplitMembers: minBlockMembers, imgW: imgW, imgH: imgH)
+            }
         var prev = Line.horizontal(atY: 0)
         let firstTop = extents[0].0
         if firstTop > 2.0 {
@@ -460,9 +463,16 @@ public func planCrops(
             continue
         }
 
-        var blocks = buildColumnBlocks(dets, members: members, angleTolDeg: angleTolDeg, colGapPx: colGapPx, minBlockMembers: minBlockMembers)
-        blocks = splitOversizedGroupList(dets, groups: blocks, energy: energy, axis: .x, maxDim: maxDim, minSplitMembers: minBlockMembers, imgW: imgW, imgH: imgH)
-        let (resolvedBlocks, vLines) = resolveColumnSeams(dets, blocks: blocks, colGapPx: colGapPx, topLine: topLine, bottomLine: bottomLine, imgW: imgW, imgH: imgH, energy: energy)
+        let resolvedBlocks: [[Int]]
+        let vLines: [Line]
+        if bandsOnly {
+            resolvedBlocks = [members]
+            vLines = [Line.vertical(atX: 0), Line.vertical(atX: Double(imgW))]
+        } else {
+            var blocks = buildColumnBlocks(dets, members: members, angleTolDeg: angleTolDeg, colGapPx: colGapPx, minBlockMembers: minBlockMembers)
+            blocks = splitOversizedGroupList(dets, groups: blocks, energy: energy, axis: .x, maxDim: maxDim, minSplitMembers: minBlockMembers, imgW: imgW, imgH: imgH)
+            (resolvedBlocks, vLines) = resolveColumnSeams(dets, blocks: blocks, colGapPx: colGapPx, topLine: topLine, bottomLine: bottomLine, imgW: imgW, imgH: imgH, energy: energy)
+        }
 
         for (blockId, block) in resolvedBlocks.enumerated() {
             guard let quad = quadFromLines(top: topLine, bottom: bottomLine, left: vLines[blockId], right: vLines[blockId + 1], imgW: imgW, imgH: imgH) else { continue }

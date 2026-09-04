@@ -115,8 +115,10 @@ directly). Unifying `bookspines` JSON is optional tech debt.
 
 | Concern | Primary file |
 |---|---|
-| `OBBDetection`, angles, IoU, polygons | `Sources/SpineCore/SpineGeometry.swift` |
+| `OBBDetection`, angles, IoU, convex polygons | `Sources/SpineCore/SpineGeometry.swift` |
+| Non-convex polygons, staircase-seam splits | `Sources/SpineCore/PolygonPartition.swift` |
 | Letterbox + decode → scene | `Sources/SpineCore/SpineInference.swift` |
 | Homography, crop remap | `Sources/SpineCore/LayoutCropImage.swift` |
-| Jigsaw planner | `Sources/SpineCore/LayoutCropPlanner.swift` |
+| Jigsaw planner (quad cutter) | `Sources/SpineCore/LayoutCropPlanner.swift` |
+| Jigsaw-zoom recursion + free-form cutter | `Sources/SpineCore/JigsawZoomEngine.swift`, `Sources/SpineCore/PieceCutter.swift` |
 | Python `Det` reference | `tools/tiled_predict_obb.py` |

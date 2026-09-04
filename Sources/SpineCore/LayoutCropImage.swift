@@ -157,8 +157,9 @@ public func axisProfile(_ energy: EdgeEnergy, axis: ProfileAxis, lo: Int, hi: In
     return out
 }
 
-private func boxcarSmooth(_ profile: [Double], k: Int) -> [Double] {
-    guard k > 1, !profile.isEmpty else { return profile }
+private func boxcarSmooth(_ profile: [Double], k kRaw: Int) -> [Double] {
+    guard kRaw > 1, !profile.isEmpty else { return profile }
+    let k = min(kRaw, profile.count)
     let half = k / 2
     var out = [Double](repeating: 0, count: profile.count)
     for i in 0..<profile.count {

@@ -151,4 +151,33 @@ final class LayoutCropPlannerTests: XCTestCase {
         let nonEmpty = plans.filter { !$0.memberIndices.isEmpty }
         XCTAssertGreaterThan(nonEmpty.count, 1, "an oversized shelf group must be re-split by size")
     }
+
+    // MARK: - bandsOnly retry path
+
+    func testPlanCropsBandsOnlyEmitsFullWidthShelfStrips() {
+        // Two shelves, each with a mixed-orientation pair so default
+        // planCrops would emit column blocks. bandsOnly must keep each
+        // original shelf as one full-width strip (plus empty gutters).
+        let imgW = 400, imgH = 400
+        let dets = [
+            det(60, 80, 40, 80, angleDeg: 0), det(120, 80, 40, 80, angleDeg: 0),
+            det(200, 80, 40, 80, angleDeg: 80), det(260, 80, 40, 80, angleDeg: 80),
+            det(60, 300, 40, 80, angleDeg: 0), det(120, 300, 40, 80, angleDeg: 0),
+            det(200, 300, 40, 80, angleDeg: 80), det(260, 300, 40, 80, angleDeg: 80),
+        ]
+        let ras = raster(width: imgW, height: imgH)
+        let defaultPlans = planCrops(dets: dets, imgW: imgW, imgH: imgH, raster: ras)
+        let defaultNonEmpty = defaultPlans.filter { !$0.memberIndices.isEmpty }
+        XCTAssertGreaterThan(defaultNonEmpty.count, 2, "sanity: default plan should split columns on orientation")
+
+        let plans = planCrops(dets: dets, imgW: imgW, imgH: imgH, raster: ras, bandsOnly: true)
+        assertValidTiling(dets, plans, imgW: imgW, imgH: imgH)
+        for p in plans {
+            let r = p.rect
+            XCTAssertEqual(r.x0, 0, accuracy: 1.0, "bandsOnly quad must span full width")
+            XCTAssertEqual(r.x1, Double(imgW), accuracy: 1.0, "bandsOnly quad must span full width")
+        }
+        let nonEmpty = plans.filter { !$0.memberIndices.isEmpty }
+        XCTAssertEqual(nonEmpty.count, 2, "exactly one occupied plan per shelf band")
+    }
 }

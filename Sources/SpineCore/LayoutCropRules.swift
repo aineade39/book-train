@@ -86,6 +86,28 @@ public func verifyPlan(
     grid: Int = LayoutConstants.defaultGridSamples,
     angleTolDeg: Double = LayoutConstants.defaultAngleTolDeg
 ) -> [RuleResult] {
+    // Quads are the special case of the polygon rules in
+    // `PartitionRules.swift`, with the whole image as the region: identical
+    // rule names, hard flags, detail formats and pass semantics (the
+    // Python-parity contract), just not restricted to four corners.
+    verifyPartition(
+        dets: dets,
+        pieces: plans.map { PartitionPiece(name: $0.name, polygon: $0.quad, memberIndices: $0.memberIndices) },
+        region: imageRegion(imgW: imgW, imgH: imgH),
+        imgW: imgW, imgH: imgH, grid: grid, angleTolDeg: angleTolDeg
+    )
+}
+
+/// The pre-delegation quad implementation, kept as the reference the
+/// polygon generalization is checked against in tests.
+func verifyPlanQuadReference(
+    dets: [OBBDetection],
+    plans: [CropPlan],
+    imgW: Int,
+    imgH: Int,
+    grid: Int = LayoutConstants.defaultGridSamples,
+    angleTolDeg: Double = LayoutConstants.defaultAngleTolDeg
+) -> [RuleResult] {
     var results: [RuleResult] = []
     guard !plans.isEmpty else {
         return [RuleResult(rule: "R5_QUAD_FINITE", hard: true, ok: false, detail: "no crops")]

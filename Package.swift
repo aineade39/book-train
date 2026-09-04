@@ -18,6 +18,7 @@ let package = Package(
         .executable(name: "book-match", targets: ["book-match"]),
         .executable(name: "spine-id", targets: ["spine-id"]),
         .executable(name: "ocr-quality-sweep", targets: ["ocr-quality-sweep"]),
+        .executable(name: "zoom-compare", targets: ["zoom-compare"]),
     ],
     dependencies: [
         // FTS5 trigram catalog (SpineCatalog) — see docs/BOOK_ID_IOS_PIPELINE.md §Catalog matching.
@@ -80,6 +81,9 @@ let package = Package(
             dependencies: ["SpineCore", "SpinePerception", "SpineCatalog", "SpineMatching", "SpineReasoning", "SpinePipeline"]
         ),
         .executableTarget(name: "ocr-quality-sweep", dependencies: ["SpineCore", "SpinePerception"]),
+        // Jigsaw-zoom Stage 0 comparison harness (single-shot vs layout-crops
+        // vs, later, jigsaw-zoom) over the scenes corpus.
+        .executableTarget(name: "zoom-compare", dependencies: ["SpineCore"]),
 
         // MARK: - Tests
 
