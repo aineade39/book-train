@@ -38,7 +38,7 @@ Script defaults resolve through `tools/paths.py` / `tools/fetch_raw.py`
 | Promoted Core ML | `models/production/` |
 | Open Library dumps | `raw/open-library/` + `SOURCE.md` |
 | Book catalog (SQLite) | `derived/book-catalog/` + per-profile `.json` sidecars |
-| Goodreads scrape (raw JSONL + checkpoint DB) | `derived/book-catalog/goodreads/` (see `tools/scrape_goodreads_lists.py`) |
+| Goodreads scrape (raw JSONL + checkpoint DB) | `derived/book-catalog/goodreads/` (see `tools/scrape_goodreads_lists.py`). Treat as irreplaceable: `disk-cleanup` item `ml-goodreads-scrape` (`backup_only`, NAS then `rclone copy` to Drive — `--item ml-goodreads-scrape` only). |
 
 Nothing under the data root (or repo-local `models/`, `runs/`, `out/`, `*.pt`)
 is committed. See `.gitignore`.

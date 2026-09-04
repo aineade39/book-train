@@ -1,0 +1,19 @@
+---
+description: Never attach multi-hour scrapes or other long jobs to an Agent-spawned shell
+alwaysApply: true
+---
+
+# Long jobs must not live in Agent shells
+
+Cursor aborts Agent-spawned terminals after about 3 hours (`status: aborted`, `exit_code: unknown`). Do not run `caffeinate -i tools/run_book_show_api_loop.sh` (or any other multi-hour command) as a background Agent Shell.
+
+Start the ISBN scrape with the detached helper (`docker compose up -d` plus host
+`caffeinate`). It returns immediately. Do not attach `compose up` without `-d`,
+or `caffeinate -i tools/run_book_show_api_loop.sh`, to an Agent shell.
+
+```bash
+.venv/bin/python tools/run_book_show_api_loop_detached.py start
+.venv/bin/python tools/run_book_show_api_loop_detached.py status
+```
+
+Babysit by polling compose/status/log/`book_show_api_progress.py`. If you need a wake-up loop, that sleeper can be an Agent shell; the scrape itself cannot.

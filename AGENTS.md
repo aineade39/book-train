@@ -16,6 +16,19 @@ Data root: `$BOOK_SPINES_DATA` (default `$HOME/ml/book-spines`). Script defaults
 come from `tools/paths.py`. Raw dumps are Drive zips fetched by
 `tools/fetch_raw.py` (see `DATA.md`).
 
+## Outside-world questions go to coldframe
+
+Platform rules, store policy, market and competitors, general engineering
+practice: [coldframe](https://github.com/aineade39/coldframe) holds these, in a
+separate repo that never reads this one. Cite its pages; do not re-derive the
+answer here.
+
+Asking "is this standard practice?" in this window returns a description of
+*this* design, restated as industry practice and sounding well-sourced. That
+has been measured, not assumed — a controlled comparison had this window cite
+these docs as evidence about the industry and state something false about a
+platform API that the isolated repo, holding the vendor's own page, got right.
+
 ## Python environment
 
 Dependencies are declared in `pyproject.toml` and pinned in `uv.lock`. Recreate
@@ -130,6 +143,9 @@ swift run -c release book-match "dune frank herbert" --db /tmp/catalog.sqlite --
 
 # Full detect → OCR → match
 swift run -c release spine-id <image> --db /tmp/catalog.sqlite [--fm] [--json out.json]
+
+# ISBN scrape loop — detached (never as a long-lived Agent shell)
+python tools/run_book_show_api_loop_detached.py start
 ```
 
 Root [`bookspines.swift`](bookspines.swift) predates this package and is
@@ -159,6 +175,12 @@ model/eval artifacts the executables write out.
 8. YOLO26 Core ML output layout differs from YOLO11 — decode paths live in
    `Sources/SpineCore/SpineInference.swift`; do not assume `[1, 6, N]` for
    every export.
+9. **Never attach a multi-hour job to an Agent-spawned shell.** Cursor aborts
+   those terminals after ~3h. Start the ISBN scrape with
+   `python tools/run_book_show_api_loop_detached.py start` (returns immediately;
+   `docker compose up -d` plus host `caffeinate`) — not `caffeinate -i tools/run_book_show_api_loop.sh`
+   as a background Agent command. One-time gate: `... prepare` after
+   `disk-cleanup nas-copy/gdrive-sync --item ml-goodreads-scrape --execute`.
 
 ## Agent habits
 
