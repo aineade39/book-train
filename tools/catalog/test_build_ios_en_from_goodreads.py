@@ -23,6 +23,7 @@ if str(_REPO) not in sys.path:
 
 from tools.catalog.ol_common import normalize_for_search, write_jsonl_gz  # noqa: E402
 from tools.catalog.build_ios_en_from_goodreads import (  # noqa: E402
+    GAP_FILL_WORK_KEY_PREFIX,
     IntermediateMismatchError,
     add_languages_column,
     copy_to_scratch,
@@ -299,8 +300,12 @@ class TestGapFill(unittest.TestCase):
                 }
             ]
             inserted = gap_fill_unmatched(conn, matched_rows, min_ratings_count=1000, placeholder_rank=1)
-            row = conn.execute("SELECT title, author, editionCount, languages FROM books WHERE workKey LIKE 'goodreads-gapfill:%'").fetchone()
-            signal = conn.execute("SELECT shelfScore FROM goodreads_signals WHERE workKey LIKE 'goodreads-gapfill:%'").fetchone()
+            row = conn.execute(
+                f"SELECT title, author, editionCount, languages FROM books WHERE workKey LIKE '{GAP_FILL_WORK_KEY_PREFIX}%'"
+            ).fetchone()
+            signal = conn.execute(
+                f"SELECT shelfScore FROM goodreads_signals WHERE workKey LIKE '{GAP_FILL_WORK_KEY_PREFIX}%'"
+            ).fetchone()
             conn.close()
         self.assertEqual(inserted, 1)
         self.assertEqual(row, ("Some Popular Missing Book", "Some Author", 0, "eng"))
@@ -345,6 +350,54 @@ class TestGapFill(unittest.TestCase):
             inserted = gap_fill_unmatched(conn, matched_rows, min_ratings_count=1000, placeholder_rank=1)
             conn.close()
         self.assertEqual(inserted, 1)
+
+
+class TestNoDataSourceLeakInShipped(unittest.TestCase):
+    """The shipped on-device catalog must never reveal Goodreads as a data
+    source. Table/column names (`goodreads_signals`, `goodreadsBookId`)
+    never ship -- `CatalogOLBuild.buildFromSubset`
+    (`Sources/catalog-build/CatalogOLBuild.swift`) only reads the fixed
+    `BookRecord` field set (workKey/title/author/isbn/titleNormalized/
+    authorNormalized/popularityRank/editionCount) plus `book_isbns`, and
+    copies `record.workKey`/`.title`/`.author` **verbatim** with no
+    transformation -- so asserting on the scratch db's `books` table here is
+    equivalent to asserting on the real shipped output for these columns,
+    without needing the Swift toolchain (this test suite's existing
+    no-Swift-required convention; see module docstring). If that Swift copy
+    ever stops being a verbatim pass-through, this equivalence breaks and
+    this test would need a real `swift run catalog-build` invocation
+    instead.
+    """
+
+    def test_gap_fill_prefix_constant_has_no_data_source_name(self) -> None:
+        self.assertNotIn("goodreads", GAP_FILL_WORK_KEY_PREFIX.lower())
+        self.assertNotIn("gr", GAP_FILL_WORK_KEY_PREFIX.lower())
+
+    def test_gap_filled_workkey_contains_no_goodreads_string(self) -> None:
+        with tempfile.TemporaryDirectory() as d:
+            db_path = Path(d) / "s.sqlite"
+            _make_full_db(db_path, [("/works/OL1W", "Dune", "Frank Herbert", 1, 10)])
+            conn = sqlite3.connect(db_path)
+            add_languages_column(conn)
+            create_goodreads_signals_table(conn)
+            matched_rows = [
+                {
+                    "work_key": None,
+                    "match_method": "unmatched",
+                    "title": "Some Popular Missing Book",
+                    "author": "Some Author",
+                    "goodreads_book_id": 42,
+                    "ratings_count": 50_000,
+                    "shelf_score": 0.6,
+                }
+            ]
+            gap_fill_unmatched(conn, matched_rows, min_ratings_count=1000, placeholder_rank=1)
+            rows = conn.execute("SELECT workKey, title, author FROM books").fetchall()
+            conn.close()
+        self.assertTrue(rows)
+        for work_key, title, author in rows:
+            for value in (work_key, title, author):
+                self.assertNotIn("goodreads", (value or "").lower())
 
 
 class TestRunEndToEnd(unittest.TestCase):

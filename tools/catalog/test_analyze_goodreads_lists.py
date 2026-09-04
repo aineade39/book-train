@@ -49,6 +49,8 @@ def _write_list_show_jsonl(path: Path, book_ids: list[int], ratings: list[int] |
         "titles": [f"Title {bid}" for bid in book_ids],
         "authors": [f"Author {bid}" for bid in book_ids],
         "rating_texts": [f"4.20 avg rating — {r:,} ratings" for r in ratings],
+        "score_texts": ["" for _ in book_ids],
+        "vote_texts": ["" for _ in book_ids],
     }
     path.write_text(json.dumps(record) + "\n", encoding="utf-8")
 

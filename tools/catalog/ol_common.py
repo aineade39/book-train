@@ -9,7 +9,7 @@ import unicodedata
 from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Iterator, Sequence
 
 
 def ol_key_tail(key: str | None) -> str | None:
@@ -40,11 +40,55 @@ def normalize_language(code: str | None) -> str | None:
 # (rare scripts, some ligatures). Matches for all common Latin-script
 # title/author text, which is effectively all of this catalog.
 _DECORATIVE_PUNCTUATION = frozenset(
-    '"\u201c\u201d\u2018\u2019'
+    '"\u201c\u201d'
     "()[]{}"
     "!?;:,"
     "*#@\u2013\u2014/\\_~`^|<>=+"
+    # "." joins "/" and "\\" above (2j-5b): GR and OL disagree on the
+    # separator in date-shaped titles -- "11.22.63" (GR) vs "11/22/63" (OL,
+    # 49 editions, confirmed via direct full.sqlite lookup) never collided
+    # because "/" was already dropped here but "." wasn't. Checked against
+    # author-initial strings ("J.R.R. Tolkien" -> already normalized via a
+    # separate path, `split_people`, which tokenizes on whitespace after
+    # this function runs -- dropping "." here just removes the now-redundant
+    # punctuation between initials, still leaving a same-tokens result) and
+    # abbreviations ("U.S.A." -> "usa", "Mr. Smith" -> "mr smith" -- both
+    # already had a following space so dropping "." doesn't fuse words).
+    "."
 )
+
+# U+2018/U+2019 (curly single quotes) are ambiguous: sometimes a scare-quote
+# pair (drop, like the double-quote curly forms above), but in practice
+# overwhelmingly an apostrophe -- "Assassin's", "She's", "O'Brien" -- almost
+# always typed/rendered as U+2019 in scraped web text (Goodreads) while OL's
+# own catalog strings mix straight and curly. Stripping them (the previous
+# behavior, matching the double-quote curlies) silently diverged from the
+# straight apostrophe U+0027, which `_DECORATIVE_PUNCTUATION` has always
+# deliberately kept (see `test_keeps_meaningful_marks` / Swift's
+# `testStripsDecorativePunctuationButKeepsMeaningfulMarks` -- apostrophes are
+# meaningful, not decorative): "Assassin's Blade" and "Assassin's Blade" (one
+# straight, one curly -- otherwise byte-identical) normalized to two
+# different strings, so `titleNormalized`/`title_core` lookups silently
+# missed a real OL row for any GR title using the glyph the OL row didn't.
+# Folding both curly forms to the straight apostrophe first (not stripping
+# either) fixes the mismatch while keeping the "apostrophes are meaningful"
+# property for both glyphs equally.
+_CURLY_APOSTROPHE_TO_STRAIGHT = {"\u2018": "'", "\u2019": "'"}
+
+# 2j-5c: GR and OL disagree on "&" vs "and" in the same title in at least one
+# observed pair (Carissa Broadbent, "The Serpent & the Wings of Night" (OL,
+# 14 editions) / "...and the Wings of Night" (GR)) -- a token substitution,
+# not a single-character fold like the apostrophe case above, so it can't
+# reuse that dict (one input char -> multiple output chars). Folds
+# unconditionally in both directions' favor (GR and OL each use both forms
+# somewhere in their own data) by always expanding to the spelled-out form;
+# existing surrounding whitespace (almost always present around "&" in real
+# titles) is untouched, so spacing comes out identical to a native "and".
+# `split_people` (author name splitting) already treats "&" as an
+# and-conjunction on the *raw*, pre-normalization string, so this doesn't
+# change author-splitting behavior -- just makes the normalized text of an
+# author string that happens to literally contain "&" consistent with that
+# existing convention.
 
 
 def _fold_case_and_diacritics(raw: str) -> str:
@@ -54,7 +98,9 @@ def _fold_case_and_diacritics(raw: str) -> str:
 
 
 def normalize_for_search(raw: str) -> str:
-    """Lowercase, diacritic-fold, collapse whitespace, strip decorative punctuation."""
+    """Lowercase, diacritic-fold, collapse whitespace, strip decorative
+    punctuation and invisible Unicode format characters, fold curly
+    apostrophes to straight and "&" to "and"."""
     folded = _fold_case_and_diacritics(raw)
 
     out_chars: list[str] = []
@@ -66,8 +112,23 @@ def normalize_for_search(raw: str) -> str:
             last_was_space = True
             continue
         last_was_space = False
-        if ch in _DECORATIVE_PUNCTUATION:
+        # 2j-5a: Unicode category "Cf" ("format") covers zero-width space
+        # (U+200B), zero-width non/joiner (U+200C/U+200D), the BOM
+        # (U+FEFF), and similar invisible characters that render as
+        # nothing but are neither whitespace (`isspace()` is False for
+        # these) nor in the fixed decorative-punctuation set above --
+        # confirmed via a real GR title, "The \u200bCrown of Gilded Bones",
+        # where a stray ZWSP after the real space before "Crown" silently
+        # broke the match. Dropped like decorative punctuation (not
+        # replaced with a space) since these characters are never a
+        # word-separator stand-in themselves -- see the ZWSP case above,
+        # where the real separating space was already a distinct character.
+        if ch in _DECORATIVE_PUNCTUATION or unicodedata.category(ch) == "Cf":
             continue
+        if ch == "&":
+            out_chars.append("and")
+            continue
+        ch = _CURLY_APOSTROPHE_TO_STRAIGHT.get(ch, ch)
         out_chars.append(ch)
 
     result = "".join(out_chars)
@@ -181,17 +242,41 @@ class WorkRow:
     popularity_rank: int = 0
 
 
-def author_key_from_work(row: dict[str, Any]) -> str | None:
-    authors = row.get("authors") or []
-    if not authors or not isinstance(authors[0], dict):
-        return None
-    first = authors[0]
-    if isinstance(first.get("key"), str):
-        return first["key"]
-    nested = first.get("author")
-    if isinstance(nested, dict) and isinstance(nested.get("key"), str):
-        return nested["key"]
-    return None
+def author_keys_from_work(row: dict[str, Any]) -> list[str]:
+    """Every author key credited on a work, in OL's listed order (first =
+    primary). OL works can credit multiple authors (co-authored books);
+    the old `author_key_from_work` kept only `authors[0]`, silently
+    dropping every co-author's name from `authorNormalized` and losing
+    real match signal for that slice of the catalog -- see the "Catalog
+    match quality" plan's co-author fix."""
+    keys: list[str] = []
+    for entry in row.get("authors") or []:
+        if not isinstance(entry, dict):
+            continue
+        key = entry.get("key")
+        if isinstance(key, str):
+            keys.append(key)
+            continue
+        nested = entry.get("author")
+        if isinstance(nested, dict) and isinstance(nested.get("key"), str):
+            keys.append(nested["key"])
+    return keys
+
+
+def join_author_names(names: Sequence[str]) -> str:
+    """Joins multiple author display names into one string, preserving OL
+    order (first = primary). Any reasonable multi-author punctuation works
+    here -- `CustomWordsBuilder.individualWords` (Swift) splits a display
+    author string on `,`/`&`/` and ` regardless of exactly how it was
+    joined, so this only needs to read naturally, not round-trip exactly."""
+    cleaned = [n.strip() for n in names if n and n.strip()]
+    if not cleaned:
+        return ""
+    if len(cleaned) == 1:
+        return cleaned[0]
+    if len(cleaned) == 2:
+        return f"{cleaned[0]} and {cleaned[1]}"
+    return ", ".join(cleaned[:-1]) + f", and {cleaned[-1]}"
 
 
 def load_authors(authors_path: Path) -> dict[str, str]:
@@ -249,8 +334,8 @@ def build_work_rows(
         title = row.get("title")
         if not isinstance(title, str) or not title.strip():
             continue
-        author_key = author_key_from_work(row)
-        author = author_names.get(author_key or "", "").strip()
+        author_keys = author_keys_from_work(row)
+        author = join_author_names([author_names[k] for k in author_keys if k in author_names])
         if not author:
             continue
         agg = edition_agg.get(work_key)

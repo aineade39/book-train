@@ -49,69 +49,18 @@ from __future__ import annotations
 
 import argparse
 import json
-import re
 import sqlite3
 import sys
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Iterator
 
 _REPO = Path(__file__).resolve().parents[2]
 if str(_REPO) not in sys.path:
     sys.path.insert(0, str(_REPO))
 
+from tools.catalog.list_show_popularity import iter_list_show_books  # noqa: E402
 from tools.paths import catalog_goodreads  # noqa: E402
-
-# Deliberately NOT importing from tools.catalog.match_goodreads: that module
-# hard-requires rapidfuzz for its OL fuzzy-matching stage, which this
-# overlap/coverage analysis has no use for. The tiny bit of list_show parsing
-# needed here (book id + ratings_count per row) is duplicated below instead,
-# keeping this tool's only dependency PyYAML — same footprint as
-# tools/scrape_goodreads_lists.py.
-_BOOK_URL_RE = re.compile(r"^/book/show/(\d+)")
-_RATING_TEXT_RE = re.compile(r"([\d.]+)\s+avg rating\s*[-\u2013\u2014]+\s*([\d,]+)\s+ratings?")
-_LIST_SHOW_FIELDS = ("book_urls", "titles", "authors", "rating_texts")
-
-
-def _parse_book_id(book_url: str | None) -> int | None:
-    if not book_url:
-        return None
-    m = _BOOK_URL_RE.match(book_url)
-    return int(m.group(1)) if m else None
-
-
-def _parse_ratings_count(rating_text: str | None) -> int | None:
-    """'4.55 avg rating — 745,415 ratings' -> 745415."""
-    if not rating_text:
-        return None
-    m = _RATING_TEXT_RE.search(rating_text)
-    return int(m.group(2).replace(",", "")) if m else None
-
-
-def _iter_list_show_rows(path: Path) -> Iterator[tuple[int, int]]:
-    """Yields (book_id, ratings_count) for every book row in a `list_show`
-    raw JSONL file, mirroring `match_goodreads._zip_list_show_record` but
-    only extracting the two fields overlap/coverage analysis needs."""
-    with path.open("r", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                record = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            lengths = {k: len(record.get(k) or []) for k in _LIST_SHOW_FIELDS}
-            n = min(lengths.values()) if lengths else 0
-            book_urls = record.get("book_urls") or []
-            rating_texts = record.get("rating_texts") or []
-            for i in range(n):
-                book_id = _parse_book_id(book_urls[i] if i < len(book_urls) else None)
-                if book_id is None:
-                    continue
-                ratings_count = _parse_ratings_count(rating_texts[i] if i < len(rating_texts) else None)
-                yield book_id, ratings_count or 0
 
 SEED_LISTS_PATH = Path(__file__).resolve().parent / "goodreads_seed_lists.yaml"
 
@@ -186,7 +135,7 @@ def load_list_data(raw_dir: Path, list_id: int) -> ListData | None:
     if not path.exists():
         return None
     data = ListData(list_id=list_id)
-    for book_id, ratings_count in _iter_list_show_rows(path):
+    for book_id, ratings_count, _list_score, _list_vote in iter_list_show_books(path):
         data.book_ids.add(book_id)
         data.ratings[book_id] = max(data.ratings.get(book_id, 0), ratings_count)
     return data

@@ -71,6 +71,10 @@ from tools.catalog.ol_common import normalize_for_search, stream_jsonl  # noqa: 
 DEFAULT_MIN_EDITIONS = 2
 DEFAULT_MAX_WORKS = 250_000
 DEFAULT_LANGUAGES = frozenset({"eng"})
+# Deliberately generic -- ships verbatim in `books.workKey` for every
+# gap-filled row (see `gap_fill_unmatched`). Must never contain "goodreads"
+# or any other data-source name.
+GAP_FILL_WORK_KEY_PREFIX = "gapfill:"
 # How much a book's rerank position depends on Goodreads shelf_score vs. its
 # original OL edition-count-based popularity. Not tuned against real scrape
 # output (see compute_shelf_score's docstring in match_goodreads.py) —
@@ -227,7 +231,13 @@ def gap_fill_unmatched(
         title, author = row.get("title"), row.get("author")
         if not title or not author:
             continue
-        work_key = "goodreads-gapfill:" + default_work_key(title, author)
+        # No mention of the data source in this prefix on purpose -- this
+        # `workKey` value is carried verbatim into the shipped on-device
+        # catalog by `CatalogOLBuild.buildFromSubset` (`record.workKey`
+        # copied as-is), unlike `goodreads_signals`/`goodreadsBookId`
+        # (table/column names, which never ship -- see this module's
+        # docstring). See `test_no_goodreads_string_in_shipped_output`.
+        work_key = GAP_FILL_WORK_KEY_PREFIX + default_work_key(title, author)
         cur = conn.execute(
             """
             INSERT OR IGNORE INTO books
